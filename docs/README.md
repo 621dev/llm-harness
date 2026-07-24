@@ -60,10 +60,15 @@ gaebalai/claude-code-orchestrator, jikime/harness-lab) + 하네스 기본 개념
   claude·codex CLI 전부 미설치) 세팅 절차. 2026-07-14 실제 처음부터 실행
   검증. 겪은 문제(PATH 갱신 안 됨, 셸 변수 노출 실수, 에이전트 도구 환경
   분리 등)도 함께 기록.
-- `harness-getting-started-guide-ko.md` — **일반인용 시작 가이드.** 도구
+- `harness-getting-started-guide-ko.md` — **일반인용 시작 가이드(CLI).** 도구
   설치는 이미 됐다는 전제 — 설치 확인(무료) → 자격증명 없이 도메인 로직만
   확인(무료) → Gemini 키 하나로 실제 LLM 첫 실행 → 내 도메인 만들기 순서,
   실행 가능한 명령어만(2026-07-24, 각 단계 실제 실행 검증).
+- `harness-getting-started-guide-claude-desktop-ko.md` — **일반인용 시작
+  가이드(Claude Desktop 전용).** 터미널 직접 조작 없이 Claude Desktop과의
+  대화로 위 가이드와 동일한 순서를 진행. MCP(Filesystem + 터미널 실행 서버)
+  연결이 먼저 필요 — 이 부분은 공식 문서 조사 기반으로 작성, Claude Desktop
+  자체를 직접 조작해 검증하지는 못함(2026-07-24).
 
 ## 코드
 
