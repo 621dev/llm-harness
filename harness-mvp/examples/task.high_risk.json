@@ -1,0 +1,5 @@
+{
+  "task_id": "high-risk-demo",
+  "prompt": "프로덕션 결제 시스템에 배포할 변경사항을 검토해줘.",
+  "constraints": []
+}

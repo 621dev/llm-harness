@@ -1,0 +1,5 @@
+{
+  "task_id": "delegation-demo",
+  "prompt": "경쟁사 A/B/C의 가격 정책을 리서치해줘.",
+  "constraints": []
+}

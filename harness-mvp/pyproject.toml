@@ -1,0 +1,15 @@
+[project]
+name = "harness-mvp"
+version = "0.0.1"
+description = "멀티 LLM 하네스 MVP (Step 0/1: 패턴 분기 골격 + Run Store)"
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.0",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

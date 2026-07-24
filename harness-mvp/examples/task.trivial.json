@@ -1,0 +1,5 @@
+{
+  "task_id": "trivial-demo",
+  "prompt": "지금 몇 시야?",
+  "constraints": []
+}

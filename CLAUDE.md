@@ -1,0 +1,32 @@
+# Multi-LLM Harness
+
+파일 기반 실행-평가 하네스. 여러 LLM(fan_out_judge/hierarchical_delegation)로 후보를
+만들고 비교/합성하거나 역할별로 순차 위임한다. 코드는 `harness-mvp/`.
+
+**시작할 때 읽을 순서**: `docs/00_작업규칙/harness-project-conventions-ko.md`(작업
+규칙) → `docs/03_진행상황/harness-progress-checklist-ko.md`(현재 상태) → 필요하면
+`harness-progress-detail-ko.md`(세부)/`harness-mvp/README.md`(코드 구조). 완전히
+새 환경/새 머신에서 시작한다면 가장 최신 `docs/03_진행상황/harness-handoff-summary-vN-ko.md`부터
+읽어도 된다(자기완결적 인수인계 요약, push할 때마다 갱신하는 문서). Python/Node.js/
+claude·codex CLI 등 도구 자체가 전혀 없는 완전 초기 머신이라면
+`docs/04_환경설정/harness-new-machine-setup-guide-ko.md`의 설치 절차부터 따라간다.
+
+**전체 스펙**: `docs/02_구현플랜/harness-implementation-plan-ko.md`.
+
+## 빠른 명령어
+
+```bash
+cd harness-mvp && pip install -e .[dev]
+python -m pytest tests/ -v
+PYTHONPATH=src python -m harness.cli run --task examples/task.fan_out.json
+```
+
+## 핵심 규칙 (전체는 docs/00_작업규칙 참고)
+
+- Claude 내부(서브에이전트 프롬프트/추론)는 영어, 그 외(대화/코드/문서)는 한국어.
+- 커밋/PR/merge는 매번 명시적 요청 시에만. `main` 직접 커밋 금지 — 브랜치 →
+  PR → squash merge.
+- 자동 테스트는 실제 API/CLI 절대 미호출(모킹). 실제 연동은 기능당 1회 수동 확인.
+- phase/step 종료 시 전체 코드 재검토 + `docs/03_진행상황/*`, `harness-mvp/README.md`
+  갱신.
+- GitHub: `621dev/multi-llm-harness` (private).
