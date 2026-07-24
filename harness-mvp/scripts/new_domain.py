@@ -145,16 +145,33 @@ def verify_domain(domain_dir: Path, *, task_id: str, expected_pattern: str) -> d
     }
 
 
-_FOLLOWUP_CHECKLIST = """
-남은 수동 작업 (이 스크립트가 하지 않음):
-  [ ] domains/{name}/examples/task.{task_id}.json의 prompt를 실제 요구사항으로 다듬기
-  [ ] harness-mvp/README.md 코드 구조 표에 새 도메인 행 추가
-  [ ] docs/03_진행상황/harness-progress-checklist-ko.md에 날짜 붙여 진행 상황 기록
-  [ ] (선택) references/ 폴더에 절차서 초안 작성
-"""
+def render_followup_checklist(name: str, task_id: str, *, repo_root: Path = _REPO_ROOT) -> str:
+    """남은 수동 작업 체크리스트를 만든다. `docs/03_진행상황/` 항목은 그 폴더가
+    실제로 있을 때만 넣는다 — 이 폴더는 도메인 실제 업무 내용과 진행 이력이 섞여
+    있어 공개 구조 미러(`621dev/llm-harness`)에서는 아예 빠져 있으므로, 없는데도
+    "갱신하라"고 안내하면 혼란만 준다(2026-07-24 실제로 공개 미러를 clone해 이
+    스크립트를 돌려보다가 발견)."""
+    lines = [
+        "",
+        "남은 수동 작업 (이 스크립트가 하지 않음):",
+        f"  [ ] domains/{name}/examples/task.{task_id}.json의 prompt를 실제 요구사항으로 다듬기",
+        "  [ ] harness-mvp/README.md 코드 구조 표에 새 도메인 행 추가",
+    ]
+    if (repo_root / "docs" / "03_진행상황" / "harness-progress-checklist-ko.md").exists():
+        lines.append("  [ ] docs/03_진행상황/harness-progress-checklist-ko.md에 날짜 붙여 진행 상황 기록")
+    lines.append("  [ ] (선택) references/ 폴더에 절차서 초안 작성")
+    return "\n".join(lines) + "\n"
 
 
 def main() -> int:
+    # Windows 기본 콘솔 코드페이지(cp949 등)는 이 스크립트가 출력하는 일부 문자를
+    # 인코딩하지 못해 UnicodeEncodeError로 죽는다(cli.py/setup_worktree.py/
+    # sync_to_public.py와 동일한 문제 — 2026-07-24 공개 미러 clone에서 이 스크립트를
+    # 실제로 실행하다 재현/확인). UTF-8을 강제해서 플랫폼 무관하게 만든다.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("name", help="도메인 폴더 이름 (예: ncp-example-domain)")
     parser.add_argument("--task-id", required=True, help="examples/task.<task-id>.json의 task_id")
@@ -197,7 +214,7 @@ def main() -> int:
             "가 있는지 확인하세요."
         )
 
-    print(_FOLLOWUP_CHECKLIST.format(name=args.name, task_id=args.task_id))
+    print(render_followup_checklist(args.name, args.task_id, repo_root=args.domains_root.parent))
     return 0
 
 

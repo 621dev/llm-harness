@@ -127,5 +127,31 @@ class VerifyDomainTest(unittest.TestCase):
         self.assertIn("implementation_review-mock", result["provider_keys"])
 
 
+class RenderFollowupChecklistTest(unittest.TestCase):
+    """공개 구조 미러(`621dev/llm-harness`)에는 docs/03_진행상황/이 없어서
+    (2026-07-24 사용자 요청으로 도메인 실제 업무 내용과 함께 제외), 그 폴더가
+    없을 때는 "갱신하라"는 안내를 아예 빼야 한다(실제로 공개 미러를 clone해
+    이 스크립트를 돌려보다가 발견한 문제)."""
+
+    def setUp(self) -> None:
+        self.tmp_dir = Path(tempfile.mkdtemp(prefix="new-domain-checklist-test-"))
+        self.addCleanup(lambda: shutil.rmtree(self.tmp_dir, ignore_errors=True))
+
+    def test_mentions_progress_checklist_when_present(self) -> None:
+        progress_dir = self.tmp_dir / "docs" / "03_진행상황"
+        progress_dir.mkdir(parents=True)
+        (progress_dir / "harness-progress-checklist-ko.md").write_text("", encoding="utf-8")
+
+        checklist = new_domain.render_followup_checklist("d", "t", repo_root=self.tmp_dir)
+
+        self.assertIn("docs/03_진행상황", checklist)
+
+    def test_omits_progress_checklist_when_absent(self) -> None:
+        checklist = new_domain.render_followup_checklist("d", "t", repo_root=self.tmp_dir)
+
+        self.assertNotIn("docs/03_진행상황", checklist)
+        self.assertIn("README.md", checklist)
+
+
 if __name__ == "__main__":
     unittest.main()
