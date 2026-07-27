@@ -3,20 +3,24 @@
 파일 기반 실행-평가 하네스. 여러 LLM(fan_out_judge/hierarchical_delegation)로 후보를
 만들고 비교/합성하거나 역할별로 순차 위임한다. 코드는 `harness-mvp/`.
 
-**시작할 때 읽을 순서**: `docs/00_작업규칙/harness-project-conventions-ko.md`(작업
-규칙) → `docs/03_진행상황/harness-progress-checklist-ko.md`(현재 상태) → 필요하면
-`harness-progress-detail-ko.md`(세부)/`harness-mvp/README.md`(코드 구조). 완전히
-새 환경/새 머신에서 시작한다면 가장 최신 `docs/03_진행상황/harness-handoff-summary-vN-ko.md`부터
-읽어도 된다(자기완결적 인수인계 요약, push할 때마다 갱신하는 문서). Python/Node.js/
-claude·codex CLI 등 도구 자체가 전혀 없는 완전 초기 머신이라면
-`docs/04_환경설정/harness-new-machine-setup-guide-ko.md`의 설치 절차부터 따라간다.
-**`docs/03_진행상황/`이 안 보인다면** — 이 저장소는 도메인별 실제 업무 내용과
-진행 이력을 제외한 공개 구조 미러(`621dev/llm-harness`)다. 이 경우
-`docs/02_구현플랜/harness-implementation-plan-ko.md`(전체 스펙)와
-`harness-mvp/README.md`(코드 구조)부터 보고, `harness-mvp/scripts/new_domain.py`로
-바로 도메인을 만들어볼 수 있다. **일단 손으로 한 번 돌려보고 싶다면**
-`docs/04_환경설정/harness-getting-started-guide-ko.md`(일반인용 시작 가이드,
-설치 확인 → 자격증명 없이 도메인 로직 확인 → 실제 LLM 첫 실행 순서)부터 볼 것.
+**시작할 때 읽을 순서**
+
+- 기본: `docs/00_작업규칙/harness-project-conventions-ko.md`(작업 규칙) →
+  `docs/03_진행상황/harness-progress-checklist-ko.md`(현재 상태) → 필요하면
+  `harness-progress-detail-ko.md`(세부)/`harness-mvp/README.md`(코드 구조)
+- 완전히 새 환경/새 머신이라면: `docs/03_진행상황/` 안 가장 최신
+  `harness-handoff-summary-vN-ko.md`부터(자기완결적 인수인계 요약, push할 때마다
+  갱신)
+- Python/Node.js/claude·codex CLI 등 도구 자체가 없는 완전 초기 머신이라면:
+  `docs/04_환경설정/harness-new-machine-setup-guide-ko.md`의 설치 절차부터
+- **`docs/03_진행상황/`이 안 보인다면**: 이 저장소는 도메인별 실제 업무 내용과
+  진행 이력을 뺀 공개 구조 미러(`621dev/llm-harness`)다. `docs/02_구현플랜/
+  harness-implementation-plan-ko.md`(전체 스펙)와 `harness-mvp/README.md`(코드
+  구조)부터 보고, `harness-mvp/scripts/new_domain.py`로 바로 도메인을 만들어볼
+  수 있다
+- **일단 손으로 한 번 돌려보고 싶다면**: `docs/04_환경설정/
+  harness-getting-started-guide-ko.md`(일반인용 시작 가이드 — 설치 확인 →
+  자격증명 없이 도메인 로직 확인 → 실제 LLM 첫 실행 순서)
 
 **전체 스펙**: `docs/02_구현플랜/harness-implementation-plan-ko.md`.
 

@@ -81,10 +81,11 @@ Debate/Consensus일 필요는 없다는 걸 이번 재분석에서 확인했기 
 2. **2차 (Self-Consistency)**: fault-injection 테스트를 통과하지 못하면(=
    여전히 죽은 검토), 같은 판단 프롬프트를 N=3회 반복해 다수결로 정하는
    Self-Consistency로 격상한다. Debate보다 명백히 싸다.
-3. **3차 (Debate/Consensus, ADR 0005 별도 문서화)**: Self-Consistency로도
+3. **3차 (Debate/Consensus, 별도 ADR로 문서화)**: Self-Consistency로도
    잡히지 않는 실패가 실제 운영(evals 리포트/`analyze-failures` 집계)에서
    반복 관측되면, 그때 비로소 Debate/Consensus 도입을 새 ADR로 논의한다.
-   이 ADR을 수정하지 않는다(ADR 0003과 동일한 원칙).
+   이 ADR을 수정하지 않는다(ADR 0003과 동일한 원칙. 참고: ADR 0005는 이후
+   다른 결정(도메인 폴더 아키텍처)에 이미 쓰였으므로 이 패턴용은 아니다).
 
 ## 이유
 

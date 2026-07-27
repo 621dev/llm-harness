@@ -49,5 +49,6 @@ Expert Pool, Producer-Reviewer, Supervisor, Hierarchical Delegation)에도 없�
   "hierarchical_delegation"]` 2종)
 - `orchestrator.py`: 변경 없음
 - 문서: `docs/03_진행상황/harness-progress-checklist-ko.md`에 "검토 완료 → 보류
-  결정"으로 기록. 재검토 트리거가 실제로 발생하면 새 ADR(0004)로 "도입한다"
-  결정을 별도로 남긴다(이 ADR을 수정하지 않음).
+  결정"으로 기록. 재검토 트리거가 실제로 발생하면 새 번호의 ADR로 "도입한다"
+  결정을 별도로 남긴다(이 ADR을 수정하지 않음. 참고: ADR 0004는 이후 다른
+  결정(Judge 실제 LLM 승격)에 이미 쓰였으므로 이 패턴용은 아니다).

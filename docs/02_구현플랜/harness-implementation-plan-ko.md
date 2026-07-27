@@ -1,9 +1,10 @@
 # 멀티 LLM 하네스 구현 플랜
 
-기반 문서: `../01_개념설명/harness-repo-summary-*-ko.md` (레포 분석). 최초 작성 당시의
-인수인계 배경 문서(v2)는 2026-07-24 문서 정리로 삭제됨 — 현재 상태는
+기반 문서: `../01_개념설명/harness-repo-summary-*-ko.md`(레포 분석). 최초 작성 당시의
+인수인계 배경 문서(v2)는 2026-07-24 문서 정리로 삭제됐다 — 현재 상태는
 `../03_진행상황/harness-progress-checklist-ko.md`, 이력은
-`harness-progress-detail-ko.md` 참고
+`harness-progress-detail-ko.md`를 볼 것.
+
 참고 레포: `revfactory/harness`, `affaan-m/ECC`, `gaebalai/claude-code-orchestrator`,
 `jikime/harness-lab`(적합성 게이트/ADR/사람 승인 체크포인트 개념, Section 12 참고)
 구현 언어: Python
@@ -21,7 +22,7 @@ Planner가 작업 성격에 따라 팀 패턴을 고르고, Orchestrator가 그 
    역할 분업과 컨텍스트/비용 절약이 중요한 작업(리서치, 순차 검토)에 쓴다.
 
 두 패턴은 목적이 다르므로 하나로 합치지 않고, `team_pattern` 필드로 분기해서 필요한 경우에만
-해당 비용을 지불하도록 설계한다. (완전 통합안은 모든 작업에 두 단계 비용을 강제하게 되어
+해당 비용을 지불하도록 설계한다. (완전 통합안은 모든 작업에 두 단계 비용을 강제해
 cost per success 관점에서 비효율적이라 기각했다.)
 
 실제 LLM API 연동 전에는 두 패턴 모두 mock provider로 파이프라인을 먼저 검증한다.
