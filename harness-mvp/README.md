@@ -1,4 +1,4 @@
-﻿# harness-mvp — Phase 1~6 완료 + ADR 0005 (도메인 폴더 아키텍처)
+# harness-mvp — Phase 1~6 완료 + ADR 0005 (도메인 폴더 아키텍처)
 
 전체 설계: `../docs/02_구현플랜/harness-implementation-plan-ko.md`.
 
