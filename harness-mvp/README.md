@@ -1,4 +1,4 @@
-# harness-mvp — Phase 1~6 완료 + ADR 0005 (도메인 폴더 아키텍처)
+﻿# harness-mvp — Phase 1~6 완료 + ADR 0005 (도메인 폴더 아키텍처)
 
 전체 설계: `../docs/02_구현플랜/harness-implementation-plan-ko.md`.
 
@@ -19,12 +19,13 @@ Phase 3 검증: mock 아님 — 실제 claude/codex CLI(구독) + Gemini REST AP
 cd harness-mvp
 pip install -e .[dev]                                     # pydantic + pytest 설치
 
-python -m pytest tests/ -v                                # 262개, 전부 mock — 실제 CLI/API 미호출
+python -m pytest tests/ -v                                # 294개, 전부 mock — 실제 CLI/API 미호출
 
 PYTHONPATH=src python -m harness.cli run --task examples/task.fan_out.json
 PYTHONPATH=src python -m harness.cli run --task examples/task.fan_out.json --models claude,gemini  # 이 실행만 후보 모델 오버라이드(codex 제외)
 PYTHONPATH=src python -m harness.cli run --task examples/task.delegation.json
 PYTHONPATH=src python -m harness.cli run --task examples/task.iterative_refinement.json --models gemini  # 생성-평가 반복 루프(opt-in 전용)
+PYTHONPATH=src python -m harness.cli run --task examples/task.agentic.json                    # 자율 에이전트가 실제 파일 생성(opt-in + 사람 승인 필수)
 PYTHONPATH=src python -m harness.cli run --task examples/task.trivial.json    # 적합성 게이트 예시
 PYTHONPATH=src python -m harness.cli run --task examples/task.high_risk.json  # 승인 대기 예시
 PYTHONPATH=src python -m harness.cli approve run-high-risk-demo               # (또는 reject)
@@ -57,7 +58,8 @@ Windows PowerShell: `$env:PYTHONPATH="src"; python -m harness.cli run --task ...
   "judge_model": "gemini",
   "delegation_model": "claude",
   "max_subscription_candidates": 1,
-  "max_refinement_rounds": 3
+  "max_refinement_rounds": 3,
+  "max_agent_turns": 8
 }
 ```
 
@@ -69,27 +71,28 @@ Windows PowerShell: `$env:PYTHONPATH="src"; python -m harness.cli run --task ...
 
 | 파일 | 역할 |
 | --- | --- |
-| `src/harness/schemas.py` | pydantic 모델 전체 (`TaskInput`, `Plan`, `DelegationStep`, `ProviderConfig`, `Candidate`, `Judging(Score)`, `RefinementVerdict`/`RefinementRound`, `RunMetrics`, `Observation`, `FitnessCheck`, `Approval`, `EvalCase`/`GradeResult`/`AttemptResult`/`EvalReport`, `FailureCategory`/`FailureReport`, `PatternStats`/`DashboardReport`) |
+| `src/harness/schemas.py` | pydantic 모델 전체 (`TaskInput`, `Plan`, `DelegationStep`, `ProviderConfig`, `Candidate`, `Judging(Score)`, `RefinementVerdict`/`RefinementRound`, `AgentToolUse`/`AgentTurn`/`AgentRunResult`, `RunMetrics`, `Observation`, `FitnessCheck`, `Approval`, `EvalCase`/`GradeResult`/`AttemptResult`/`EvalReport`, `FailureCategory`/`FailureReport`, `PatternStats`/`DashboardReport`) |
 | `src/harness/run_store.py` | run 디렉토리 입출력 — 생성/조회, JSON/Markdown 저장·로드 |
 | `src/providers/base.py`, `mock.py` | `Provider` 인터페이스 + 결정적 `MockProvider`(프로필 3종, 실패 주입 가능) |
 | `src/harness/model_runner.py` | fan_out_judge 독립 후보 생성(`run_all`), 적합성 게이트 탈락 시 단일 호출(`direct_call`), 공통 재시도(`generate_with_retry`) |
 | `src/harness/subagent_runner.py` | hierarchical_delegation 체인 실행(`delegate`/`run_chain`), 컨텍스트 격리 시뮬레이션, 역할별 지시문 스코핑(`_apply_role_instruction` — 첫 스텝/이어받는 스텝을 구분해 "당신의 역할은 X" 문구를 입력에 덧붙임, 2026-07-27 server-engineering-learning 도메인 실제 e2e에서 codex 타임아웃 원인 발견 후 추가) |
+| `src/harness/agent_runner.py` | agentic_task 전용 — 자율 에이전트 실행을 감싸는 층(ADR 0007). 격리된 `artifacts/agent_workspace/` 준비, 실행 후 **실제 파일 시스템 스캔**으로 산출물 판정(에이전트 자기 보고 불신), 턴별 도구 호출을 `agent_turns.json`으로 기록. 도구 허용목록/턴 상한 같은 실행 시점 제약은 provider가 CLI 인자로 강제 |
 | `src/harness/router.py` | 적합성 게이트(`check_fitness`) + team_pattern 사전 분류(`classify_team_pattern`) |
-| `src/harness/planner.py` | task → Plan(task_type/risk_level/rubric/team_pattern/delegation_chain 규칙 산출). `constraints`의 `"team_pattern:<pattern>"` 명시적 override 지원(`risk_level:` override와 대칭) — iterative_refinement는 키워드 자동 라우팅 없이 이 opt-in으로만 진입 |
+| `src/harness/planner.py` | task → Plan(task_type/risk_level/rubric/team_pattern/delegation_chain 규칙 산출). `constraints`의 `"team_pattern:<pattern>"` 명시적 override 지원(`risk_level:` override와 대칭) — iterative_refinement/agentic_task는 키워드 자동 라우팅 없이 이 opt-in으로만 진입. agentic_task는 실제 파일을 만드는 부수 효과가 있어 `risk_level="high"`를 강제(사람 승인 필수, ADR 0007) |
 | `src/harness/judge.py` | `judge_provider`로 실제 LLM 판단(reject-first + JSON 응답 파싱). `evaluate()` — N개 후보 비교(blind A/B 익명화, ADR 0004로 규칙 기반에서 승격, fan_out_judge 전용) + `check_pass()` — 단일 콘텐츠 rubric 합격 판정 + 수정 피드백(iterative_refinement 전용) |
 | `src/harness/synthesizer.py` | winner 채택 또는 상위 두 후보 병합(규칙 기반, fan_out_judge 전용) |
 | `src/harness/safety.py` | 비밀정보/프롬프트 인젝션/고위험 키워드 규칙 기반 스캔(패턴 공통) |
-| `src/harness/orchestrator.py` | 전체 dispatch: 적합성 게이트 → Planner → (risk_level=high면 승인 대기) → 패턴 실행 → Safety(실패 시 사람 검토 대기) → 기록. `resolve_safety_review()`/`list_safety_review_queue()` 포함. fan_out_judge candidate 선택 시 구독 provider를 `MAX_SUBSCRIPTION_CANDIDATES`개까지만 호출(`_limit_subscription_candidates`, 구독 한도 보호). `_run_iterative_refinement()` — 생성→합격 판정→피드백 반영 재생성 반복(`MAX_REFINEMENT_ROUNDS=3` 상한, 라운드별 `refinement.json` 기록, 상한 도달/중간 실패 시 마지막 생성물 partial 승격, ADR 0006) |
+| `src/harness/orchestrator.py` | 전체 dispatch: 적합성 게이트 → Planner → (risk_level=high면 승인 대기) → 패턴 실행 → Safety(실패 시 사람 검토 대기) → 기록. `resolve_safety_review()`/`list_safety_review_queue()` 포함. fan_out_judge candidate 선택 시 구독 provider를 `MAX_SUBSCRIPTION_CANDIDATES`개까지만 호출(`_limit_subscription_candidates`, 구독 한도 보호). `_run_iterative_refinement()` — 생성→합격 판정→피드백 반영 재생성 반복(`MAX_REFINEMENT_ROUNDS=3` 상한, 라운드별 `refinement.json` 기록, 상한 도달/중간 실패 시 마지막 생성물 partial 승격, ADR 0006). `_run_agentic_task()` — 자율 에이전트 실행을 감싼다(`AGENT_PROVIDER_KEY`로 등록된 provider, `MAX_AGENT_TURNS` 상한(기본 8), 턴 상한 도달 시 partial 승격, 안전 경계가 차단한 시도(`blocked_tool_uses`)는 errors.json/보고서에 기록, ADR 0007). `_finalize()`의 `extra_scan_texts`로 에이전트가 만든 **파일 내용까지 Safety 스캔** |
 | `src/harness/cli.py` | `run`/`replay`/`approve`/`reject`/`safety-queue`/`safety-approve`/`safety-reject`/`analyze-failures`/`dashboard`/`status`/`worktree-sync`/`worktree-check-cleanup` 진입점(`python -m harness.cli`). `run`/`approve`는 `--models`로 fan_out_judge 후보 모델(claude/codex/gemini 중 선택)을 그 실행만 오버라이드. `status`는 `live_status.py` 문단, `worktree-sync`/`worktree-check-cleanup`은 `scripts/setup_worktree.py` 문단 참고(도입 배경은 `docs/03_진행상황/harness-progress-detail-ko.md`) |
-| `src/harness/config.py`, `config.json` | 운영 설정(후보/judge/delegation 모델, 구독 한도 상한, iterative_refinement 라운드 상한)을 코드 밖으로 분리. `HarnessConfig`(pydantic) + `load_config()` — 파일 없으면 기본값(기존 하드코딩과 동일) |
+| `src/harness/config.py`, `config.json` | 운영 설정(후보/judge/delegation 모델, 구독 한도 상한, iterative_refinement 라운드 상한, agentic_task 턴 상한)을 코드 밖으로 분리. `HarnessConfig`(pydantic) + `load_config()` — 파일 없으면 기본값(기존 하드코딩과 동일) |
 | `src/harness/failure_analysis.py` | `analyze_failures()` — 전체 run의 errors.json stage / safety_review.json finding 집계, 반복 실패 패턴 요약(Phase 5, 규칙 자동 수정은 아님) |
 | `src/harness/dashboard.py` | `build_dashboard()`/`render_html()` — 저장된 run 산출물(plan.json/metrics.json/errors.json/safety_review.json/approval.json)만으로 team_pattern별 성공/경고/실패율·평균 latency/cost를 정적 HTML로 렌더링(Phase 6, 재실행 없음, eval pass@k 미포함) |
 | `src/harness/live_status.py` | dashboard.py(회고적 집계)와 달리 `cli.py status`로 실시간 상태 판정. `describe_run()` — `run_meta.json` pid 생존 여부로 실행중/중단됨 구분, errors.json이 final.md 없이 단독 존재 시 크래시 아닌 "출력 없이 정상 종료(done_error)"로 판정. prompt/task_id도 결과 포함. `describe_estimate_output()`/`list_domain_activity()` — LLM 없이 파일만 생성하는 도메인 작업도 team_pattern=`direct_output`으로 같은 목록에 포함. `list_live_status_multi()`/`_domain_label()` — `--root`(반복 지정) 또는 `--all-domains`(`git worktree list`로 전체 도메인 자동 탐색)로 여러 도메인 workspace 한 번에 조회. `render_html()`/`render_guide_html()` — 자기완결형 정적 HTML(`--output` 스냅샷, 자동 새로고침 없음), "요청 내용"은 `<details>` 접기, 도메인/team_pattern/상태 드롭다운 필터, "이 표를 보는 법" 가이드는 별도 페이지(`guide.html`, 양방향 링크). 도입 배경/버그 이력: `docs/03_진행상황/harness-progress-detail-ko.md`(2026-07-16~07-24) |
-| `harness-mvp/docs/adr/0001-*.md` ~ `0006-*.md` | 구조 결정 기록(Section 12.3). 0003: 세 번째 팀 패턴(Debate/Consensus) 도입 보류. 0004: Judge 규칙 기반 → 단일 실제 LLM 판단 승격. 0005: 역할별 확장은 공유 엔진 + 독립 도메인 폴더. 0006: 세 번째 팀 패턴 `iterative_refinement`(생성-평가 반복 루프) 도입 |
-| `examples/task.*.json` | fan_out/delegation/high_risk/trivial/iterative_refinement 5가지 예시 task |
+| `harness-mvp/docs/adr/0001-*.md` ~ `0007-*.md` | 구조 결정 기록(Section 12.3). 0003: 세 번째 팀 패턴(Debate/Consensus) 도입 보류. 0004: Judge 규칙 기반 → 단일 실제 LLM 판단 승격. 0005: 역할별 확장은 공유 엔진 + 독립 도메인 폴더. 0006: 세 번째 팀 패턴 `iterative_refinement`(생성-평가 반복 루프) 도입. 0007: 네 번째 팀 패턴 `agentic_task` — 자율 에이전트(claude CLI)를 안전 경계와 함께 감쌈 |
+| `examples/task.*.json` | fan_out/delegation/high_risk/trivial/iterative_refinement/agentic 6가지 예시 task |
 | `src/evals/graders.py` | deterministic grader — run_status/final.md 존재/필수·금지 문구 채점 |
 | `src/evals/runner.py` | `run_case_k_times(case, providers_factory, k)` — 동일 케이스 k회 실행, pass_rate(pass@1 근사)/pass_at_k/pass_pow_k, cost·latency per success 계산 |
-| `src/providers/cli_subscription_provider.py` | `ClaudeCliProvider`/`CodexCliProvider` — claude/codex CLI subprocess 호출, 구독 세션(실제 CLI 검증 완료). 프롬프트는 커맨드라인 인자 아닌 stdin(`input=`) 전달(Windows `.CMD` 긴 인자 손상 버그 수정 — claude는 2026-07-13 ADR 0005 작업 중, codex는 같은 날 별도 환경에서 재현/수정) |
+| `src/providers/cli_subscription_provider.py` | `ClaudeCliProvider`/`CodexCliProvider` — claude/codex CLI subprocess 호출, 구독 세션(실제 CLI 검증 완료). 프롬프트는 커맨드라인 인자 아닌 stdin(`input=`) 전달(Windows `.CMD` 긴 인자 손상 버그 수정 — claude는 2026-07-13 ADR 0005 작업 중, codex는 같은 날 별도 환경에서 재현/수정). **`ClaudeAgentProvider`**(ADR 0007) — 같은 claude 바이너리를 에이전트 모드로 여는 서브클래스: `--output-format stream-json`으로 턴별 도구 호출을 관측하고, 안전 경계를 CLI 인자로 강제한다. **경계는 세 인자가 세트**(`--permission-mode dontAsk` + 경로 스코프 allow `Read(./**)` + `--disallowedTools "Bash,Glob,..."`) — 2026-07-27 첫 e2e에서 `--allowedTools`만으로는 전혀 안 막히고 에이전트가 실제 저장소를 탐색한 걸 확인하고 수정했다(ADR 0007 "경계가 뚫린 것을 발견" 절). 차단된 시도는 `permission_denials`→`blocked_tool_uses`로 기록. 턴 상한 도달은 예외가 아니라 `stop_reason="max_turns"` |
 | `src/providers/api_provider.py` | `GeminiApiProvider` — Gemini REST(`generateContent`) API 키 직접 호출, `x-goog-api-key` 헤더(실제 API 검증 완료) |
 | `src/fetchers/base.py` | `Fetcher` ABC(`fetch(**params) -> FetchResult`) — 읽기 전용 외부 데이터 조회, `Provider`와 역할 구분해 별도 top-level 패키지(ADR 0005) |
 | `src/fetchers/aws_price_fetcher.py` | `AwsEc2PriceFetcher` — AWS Price List Bulk API(인증 불필요)로 EC2 온디맨드 요금 조회, 24시간 캐시. 실제 계정 없이 검증 완료 |
@@ -178,7 +181,7 @@ dashboard/failure_analysis/live_status → cli). CI 없는 프로젝트라 "린�
 검증**: `schemas.py`에 `from . import orchestrator`(역방향) 임시 추가 →
 테스트가 정확히 잡아내는 것 확인 후 원복.
 
-## 테스트 (262개, 전부 통과)
+## 테스트 (294개, 전부 통과)
 
 새 테스트 파일 추가/파일별 개수 변경 시 이 표도 같이 갱신(2026-07-24 문서
 감사에서 실제(239개)와 다른 옛 숫자(141개)로 오래 방치된 것 발견 —
@@ -187,18 +190,19 @@ dashboard/failure_analysis/live_status → cli). CI 없는 프로젝트라 "린�
 
 | 파일 | 개수 | 대상 |
 | --- | --- | --- |
-| `test_cli.py` | 33 | `--models` 파싱(기본값/콤마 구분/공백 제거/알 수 없는 모델 거부), 후보 provider 부분 선택 시 나머지 제외, judge/delegation provider는 선택 무관 항상 포함, config.json의 judge_model/delegation_model/max_refinement_rounds 반영 여부, config.json 없음/일부 필드만 처리, 기본 config 경로가 cwd 기준 상대경로 해석(ADR 0005), `git worktree list --porcelain` 파싱/탐색(모킹), `worktree-sync`/`worktree-check-cleanup`의 동기화·정리 판정 로직(up_to_date/merged 판정은 stdout 문구가 아니라 merge 전후 HEAD SHA 비교로 함) |
+| `test_cli.py` | 35 | `--models` 파싱(기본값/콤마 구분/공백 제거/알 수 없는 모델 거부), 후보 provider 부분 선택 시 나머지 제외, judge/delegation/agent provider는 선택 무관 항상 포함, config.json의 judge_model/delegation_model/max_refinement_rounds/max_agent_turns 반영 여부, config.json 없음/일부 필드만 처리, 기본 config 경로가 cwd 기준 상대경로 해석(ADR 0005), `git worktree list --porcelain` 파싱/탐색(모킹), `worktree-sync`/`worktree-check-cleanup`의 동기화·정리 판정 로직(up_to_date/merged 판정은 stdout 문구가 아니라 merge 전후 HEAD SHA 비교로 함) |
 | `test_step0_smoke.py` | 2 | pydantic 생성 시점 검증, dispatcher unknown team_pattern 방어 |
 | `test_step2_model_runner.py` | 5 | fan_out_judge 후보 생성, 재시도/복구, auth_mode별 cost_usd |
 | `test_step3_subagent_runner.py` | 8 | 체인 실행, 컨텍스트 격리, 재시도/복구, 체인 중단, 역할별 지시문 스코핑(첫 스텝/이어받는 스텝 문구 구분, input_ref는 원본 내용 유지) |
-| `test_step4_planner.py` | 9 | task_type/team_pattern/risk_level/rubric 산출 규칙, `team_pattern:` override(정상/알 수 없는 값 무시) |
+| `test_step4_planner.py` | 11 | task_type/team_pattern/risk_level/rubric 산출 규칙, `team_pattern:` override(정상/알 수 없는 값 무시), agentic_task의 risk_level=high 강제 및 명시적 override 우선 |
 | `test_step5_router.py` | 9 | 적합성 게이트, team_pattern 사전 분류, direct_call |
 | `test_step6_judge_synthesizer.py` | 15 | judge_provider 호출/응답 파싱, 레이블↔model_id 매핑, JudgeError 2종(호출/JSON 파싱 실패), latency/cost 기록, winner/전략 결정, 합성, `check_pass()` 6종(pass/fail 파싱, rubric·콘텐츠 프롬프트 포함, JSON 아님/passed 비bool/호출 실패 시 JudgeError) |
 | `test_step7_safety.py` | 5 | 비밀정보/인젝션/고위험 키워드 탐지 |
 | `test_step9_integration.py` | 13 | 두 패턴 전체 실행, 재현성, 적합성 게이트, 승인 체크포인트, partial 승격 경로 Safety 회귀, 구독 provider 한도 보호 2종, resume 시 run_meta pid 갱신 |
 | `test_iterative_refinement.py` | 7 | 반복 루프 통합(1라운드 통과/피드백이 다음 라운드 프롬프트에 주입/상한 도달 시 partial 승격/비용·지연 라운드 합산/생성 영구 실패/evaluator 실패 시 partial/judge provider 미등록 방어) |
+| `test_agentic_task.py` | 18 | 자율 에이전트를 감싸는 하네스 검증(ADR 0007) — 승인 전 에이전트 미실행(워크스페이스조차 안 생김)/반려 시 파일 없음/격리 워크스페이스에만 생성/`agent_turns.json` 행동 기록/산출물은 파일 시스템 스캔으로 판정/**생성 파일 비밀정보 → safety review + final.md 차단**(회귀 방지 핵심)/정상 파일 오탐 없음/max_turns partial 승격/에이전트 오류·provider 실패 처리/턴 상한 전달/차단된 도구 사용이 run을 실패시키지 않되 기록은 남는지/에이전트 provider가 후보 목록에서 제외/워크스페이스 스캔 유틸 4종 |
 | `test_phase2_eval_harness.py` | 10 | grader 채점 규칙 5종, pass@k 러너(전부 성공/혼합/성공만 평균/k<1 예외/hierarchical_delegation) |
-| `test_phase3_cli_subscription_provider.py` | 20 | claude/codex CLI 응답 파싱, 에러(비정상 종료/JSON 파싱 실패/CLI 미설치/타임아웃), 토큰 추출, stdin 전달 확인(Windows `.CMD` 인자 손상 회귀), 격리된 cwd 실행(저장소 정보 유출 회귀) — `subprocess.run` 모킹 |
+| `test_phase3_cli_subscription_provider.py` | 30 | claude/codex CLI 응답 파싱, 에러(비정상 종료/JSON 파싱 실패/CLI 미설치/타임아웃), 토큰 추출, stdin 전달 확인(Windows `.CMD` 인자 손상 회귀), 격리된 cwd 실행(저장소 정보 유출 회귀). `ClaudeAgentProvider` 10종: stream-json 턴/도구 호출 파싱, 도구 대상만 기록(파일 본문 제외), max_turns는 예외 아닌 `stop_reason`, 에이전트 오류, result 메시지 없으면 실패, **안전 경계 3종이 전부 CLI 인자로 전달되는지**(`--permission-mode dontAsk`/경로 스코프 allow 규칙/`--disallowedTools` — 2026-07-27 실제로 뚫린 것의 회귀 방지), 차단 기록(`permission_denials`) 파싱 — `subprocess.run` 모킹 |
 | `test_phase3_api_provider.py` | 9 | Gemini 응답 파싱(멀티 파트), API 키 미설정/비정상 상태코드/네트워크 오류(URL 비노출)/JSON 아닌 200/빈 응답, 키 헤더 전달 확인 — `requests.post` 모킹 |
 | `test_phase4_safety_gate.py` | 7 | Safety 실패 시 검토 대기 진입, 승인(release)/반려(block), 중복 처리 방지, 잘못된 decision 거부, 검토 큐 목록/해소 후 제외 |
 | `test_phase5_failure_analysis.py` | 6 | 빈 워크스페이스, errors.json stage별 집계, safety_review.json finding 단위 집계, 예시 run_id 중복제거·3개 제한, 사유 없음 fallback |
@@ -207,7 +211,7 @@ dashboard/failure_analysis/live_status → cli). CI 없는 프로젝트라 "린�
 | `test_live_status.py` | 47 | pid 생존 판정(OS 무관), `describe_run()` 상태 판정 전종(errors.json 단독 존재 시 done_error 회귀 포함), 여러 workspace 합산, direct_output 판정, `render_html()`/`render_guide_html()`(필터, 접기, 가이드 분리·양방향 링크) |
 | `test_new_domain_script.py` | 7 | config.json/task json 생성, 기존 도메인 재생성 에러, 라우팅 키워드 유무별 분류·경고, provider 레지스트리 구성 |
 | `test_setup_worktree_script.py` | 3 | 새 worktree sparse-checkout 적용, 메인 체크아웃 실행 시 거부, domains/ 없을 때 거부(git 호출 전 차단) |
-| `test_architecture_layers.py` | 6 | `harness/*.py` 상대 import 추출(순수 함수), 전체 모듈의 허용 계층 준수 여부 |
+| `test_architecture_layers.py` | 6 | `harness/*.py` 상대 import 추출(순수 함수), 전체 모듈의 허용 계층 준수 여부(`agent_runner` 포함) |
 
 ```bash
 python -m pytest tests/ -v

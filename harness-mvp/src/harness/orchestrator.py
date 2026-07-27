@@ -10,7 +10,8 @@ Section 12.1/12.2(적합성 게이트, 승인 체크포인트), Phase 4(Safety R
 3. risk_level="high"면 approval.json을 "pending"으로 쓰고 여기서 멈춘다
    (사람이 `resume(run_id, "approved"/"rejected", ...)`로 이어가야 함 — cli.py의
    `approve`/`reject` 명령이 이걸 호출한다)
-4. team_pattern에 따라 fan_out_judge/hierarchical_delegation 실행
+4. team_pattern에 따라 fan_out_judge/hierarchical_delegation/iterative_refinement/
+   agentic_task 실행
 5. Safety 체크(항상 실행, 절대 생략하지 않음). 통과하면 final.md 기록. 실패하면
    즉시 차단하는 게 아니라 safety_review.json을 "pending"으로 쓰고 내용을
    pending_review_content.md에 보관한 채 "사람 검토 대기" 상태로 멈춘다 — Safety를
@@ -27,11 +28,22 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Literal, Optional
+from typing import Iterable, Literal, Optional, Sequence
 
 from providers.base import Provider
 
-from . import judge, live_status, model_runner, planner, router, run_store, safety, subagent_runner, synthesizer
+from . import (
+    agent_runner,
+    judge,
+    live_status,
+    model_runner,
+    planner,
+    router,
+    run_store,
+    safety,
+    subagent_runner,
+    synthesizer,
+)
 from .schemas import Approval, DelegationStep, Observation, Plan, RefinementRound, RunMetrics, TaskInput
 
 MIN_CANDIDATES = 2  # Section 6: fan_out_judge, 이 이상 성공해야 평가를 진행한다
@@ -40,6 +52,19 @@ MIN_CANDIDATES = 2  # Section 6: fan_out_judge, 이 이상 성공해야 평가�
 # 이 키로 등록해두면 candidate 선택(_candidate_providers)에서는 제외되고
 # judge.evaluate()에만 전달된다.
 JUDGE_PROVIDER_KEY = "__judge__"
+
+# agentic_task가 에이전트 provider를 찾는 예약 키 (ADR 0007, JUDGE_PROVIDER_KEY와 대칭).
+# 이 키로 등록된 provider는 일반 후보/역할 호출에서 제외되고 agentic_task에서만 쓰인다 —
+# 도구 사용 권한을 가진 provider가 다른 패턴에 실수로 섞여 들어가지 않게 하는 안전장치이기도 하다.
+AGENT_PROVIDER_KEY = "__agent__"
+
+# agentic_task의 턴 상한. 에이전트가 도구를 호출하며 진행하는 횟수를 묶는다
+# (Section 6 "무한 재시도 금지"와 같은 철학, 여기서는 무한 루프 금지).
+# config.json의 max_agent_turns로 조정 가능 — cli.py가 실행 시 반영한다.
+# 기본값 8: 첫 e2e(2026-07-27) 실측에서 에이전트가 초반 2~3턴을 방향 파악
+# (허용 안 된 도구 시도 포함)에 쓰는 걸 보고 5에서 올렸다 — 5로는 파일 3개짜리
+# 작업이 매번 상한에 걸려 partial로 끝났다.
+MAX_AGENT_TURNS = 8
 
 # iterative_refinement의 라운드 상한 (Section 6 "무한 재시도 금지"와 같은 철학).
 # 라운드마다 generator+evaluator 2회 호출이 발생하므로 최악의 경우 LLM 호출 수는
@@ -60,6 +85,7 @@ _REPLAY_FILES = (
     "approval.json",
     "judging.json",
     "refinement.json",
+    "agent_turns.json",
     "final.md",
     "safety.md",
     "safety_review.json",
@@ -227,14 +253,17 @@ def _run_pattern(task: TaskInput, plan: Plan, providers: dict[str, Provider], ru
         return _run_hierarchical_delegation(task, plan, providers, run_dir)
     if plan.team_pattern == "iterative_refinement":
         return _run_iterative_refinement(task, plan, providers, run_dir)
+    if plan.team_pattern == "agentic_task":
+        return _run_agentic_task(task, providers, run_dir)
     raise ValueError(f"unknown team_pattern: {plan.team_pattern!r}")
 
 
 def _candidate_providers(providers: dict[str, Provider]) -> dict[str, Provider]:
-    """judge 전용으로 예약된 키(JUDGE_PROVIDER_KEY)를 제외한, 실제 후보/역할
-    호출용 provider만 추린다 — direct_call/fan_out_judge가 judge provider를
-    후보로 잘못 집어가지 않도록 방어한다."""
-    return {key: p for key, p in providers.items() if key != JUDGE_PROVIDER_KEY}
+    """예약 키(judge/agent)를 제외한, 실제 후보/역할 호출용 provider만 추린다 —
+    direct_call/fan_out_judge가 judge provider를 후보로 잘못 집어가지 않도록
+    방어한다. 에이전트 provider(AGENT_PROVIDER_KEY)도 같이 제외한다: 도구 사용
+    권한을 가진 provider가 일반 텍스트 생성 자리에 섞여 들어가면 안 된다."""
+    return {key: p for key, p in providers.items() if key not in (JUDGE_PROVIDER_KEY, AGENT_PROVIDER_KEY)}
 
 
 def _limit_subscription_candidates(candidate_providers: list[Provider]) -> list[Provider]:
@@ -475,6 +504,125 @@ def _run_iterative_refinement(
     )
 
 
+def _run_agentic_task(task: TaskInput, providers: dict[str, Provider], run_dir: Path) -> Observation:
+    """자율 에이전트에게 작업을 맡기고, 그 실행을 감싸서 기록한다 (ADR 0007).
+
+    다른 세 패턴과 근본적으로 다른 점: 여기서는 하네스가 루프를 돌리지 않는다.
+    에이전트가 스스로 도구를 호출하며 진행하고, 하네스는 경계(작업공간/도구/턴
+    상한 — provider가 CLI 인자로 강제)와 사후 검증(실제 산출물 확인, Safety,
+    기록)을 맡는다. 이 패턴은 planner가 risk_level="high"를 강제하므로 여기
+    도달했다는 건 이미 사람 승인을 통과했다는 뜻이다.
+
+    최종 출력은 에이전트의 요약 + 실제로 만들어진 파일 목록이다. 진짜 산출물은
+    텍스트가 아니라 `artifacts/agent_workspace/` 안의 파일이고, final.md는 그
+    작업에 대한 보고서 역할을 한다.
+    """
+    agent_provider = providers.get(AGENT_PROVIDER_KEY)
+    if agent_provider is None:
+        raise ValueError(
+            f"agentic_task에는 에이전트 provider가 필요하다 "
+            f"(providers[{AGENT_PROVIDER_KEY!r}]에 등록, ADR 0007 참고)"
+        )
+
+    try:
+        result = agent_runner.run_agent_task(agent_provider, task.prompt, run_dir, max_turns=MAX_AGENT_TURNS)
+    except Exception as exc:  # noqa: BLE001 - provider 구현체마다 예외 타입이 다를 수 있음
+        # 에이전트가 시작조차 못 한 경우(바이너리 없음/타임아웃 등). 다른 패턴의
+        # "재시도까지 실패" 경로와 달리 재시도하지 않는다 — 부분적으로 파일을
+        # 쓰다 만 상태에서 처음부터 다시 실행하면 같은 작업을 두 번 하게 된다.
+        return _finalize_without_output(
+            run_dir,
+            errors=[{"stage": "agentic_task", "message": f"에이전트 실행 실패: {exc}"}],
+            latency_ms=None,
+            cost_usd=None,
+            completed=0,
+            failed=1,
+        )
+
+    errors: list[dict[str, str]] = []
+    if result.blocked_tool_uses:
+        # 경계가 막아낸 시도는 run 실패가 아니지만(정상 방어) 반드시 기록에 남긴다 —
+        # 에이전트가 반복적으로 경계 밖을 노리는 패턴은 사람이 봐야 할 신호다.
+        blocked = ", ".join(sorted({use.tool for use in result.blocked_tool_uses}))
+        errors.append(
+            {
+                "stage": "agentic_task",
+                "message": f"안전 경계가 차단한 도구 사용 {len(result.blocked_tool_uses)}건: {blocked}",
+            }
+        )
+    if result.stop_reason == "error":
+        errors.append({"stage": "agentic_task", "message": f"에이전트가 오류로 종료함: {result.final_text[:200]}"})
+    elif result.stop_reason == "max_turns":
+        errors.append(
+            {
+                "stage": "agentic_task",
+                "message": f"턴 상한({MAX_AGENT_TURNS}회) 도달로 중단 — 그때까지 만든 파일만 남음",
+            }
+        )
+
+    if not result.produced_files and result.stop_reason != "completed":
+        # 남긴 것도 없고 정상 종료도 아니면 승격할 결과 자체가 없다
+        # (체인이 첫 단계부터 실패한 경우와 같은 처리).
+        return _finalize_without_output(
+            run_dir, errors=errors, latency_ms=result.latency_ms, cost_usd=result.cost_usd, completed=0, failed=1
+        )
+
+    workspace = agent_runner.agent_workspace(run_dir)
+    # 생성된 파일 내용도 Safety 스캔 대상에 넣는다 — 이 패턴의 진짜 산출물은
+    # final.md 텍스트가 아니라 파일이라, 파일을 안 보면 Safety가 사실상 무력해진다.
+    produced_texts = agent_runner.read_produced_texts(workspace, result.produced_files)
+
+    is_partial = result.stop_reason != "completed"
+    return _finalize(
+        run_dir,
+        _render_agent_report(result),
+        errors=errors,
+        latency_ms=result.latency_ms,
+        cost_usd=result.cost_usd,
+        completed=len(result.produced_files),
+        failed=1 if is_partial else 0,
+        stage="agentic_task_partial" if is_partial else "agentic_task",
+        content_prefix="(partial) " if is_partial else "",
+        success_summary=(
+            f"에이전트가 {len(result.turns)}턴 동안 파일 {len(result.produced_files)}개 생성"
+            + (f" (중단 사유: {result.stop_reason})" if is_partial else "")
+        ),
+        extra_scan_texts=produced_texts,
+    )
+
+
+def _render_agent_report(result) -> str:
+    """final.md에 들어갈 보고서 — 에이전트 요약 + 실제 산출물/행동 기록 요약.
+
+    파일 본문은 넣지 않는다(진짜 산출물은 워크스페이스에 있고, 여기 복사하면
+    같은 내용이 두 곳에 생겨 어느 쪽이 정본인지 흐려진다).
+    """
+    file_lines = "\n".join(f"- `{name}`" for name in result.produced_files) or "- (생성된 파일 없음)"
+    tool_counts: dict[str, int] = {}
+    for turn in result.turns:
+        for use in turn.tool_uses:
+            tool_counts[use.tool] = tool_counts.get(use.tool, 0) + 1
+    tool_summary = ", ".join(f"{tool} {count}회" for tool, count in sorted(tool_counts.items())) or "도구 사용 없음"
+    blocked_summary = (
+        ", ".join(sorted({use.tool for use in result.blocked_tool_uses}))
+        if result.blocked_tool_uses
+        else "없음"
+    )
+
+    return (
+        f"{result.final_text.strip()}\n\n"
+        "---\n\n"
+        "## 생성된 파일 (artifacts/agent_workspace/)\n"
+        f"{file_lines}\n\n"
+        "## 실행 요약\n"
+        f"- 턴 수: {result.num_turns if result.num_turns is not None else len(result.turns)}\n"
+        f"- 도구 사용: {tool_summary}\n"
+        f"- 안전 경계가 차단한 시도: {blocked_summary}\n"
+        f"- 종료 사유: {result.stop_reason}\n"
+        "- 턴별 상세: `agent_turns.json`\n"
+    )
+
+
 def _build_refinement_prompt(original_prompt: str, previous_content: str, feedback: str) -> str:
     return (
         "다음 요청에 대한 이전 답변이 심사에서 통과하지 못했다. 심사 피드백을 반영해 "
@@ -584,6 +732,7 @@ def _finalize(
     stage: str,
     content_prefix: str = "",
     success_summary: Optional[str] = None,
+    extra_scan_texts: Sequence[str] = (),
 ) -> Observation:
     """Safety 체크(항상 실행) 후 final.md/metrics.json/errors.json을 기록한다.
 
@@ -594,9 +743,14 @@ def _finalize(
     Release Gate, `_enter_safety_review` 참고) — content_prefix(예: "(partial) ")는
     검토 후 공개될 때도 그대로 남아있어야 하므로, Safety 체크 전에 미리 적용해서
     저장해둔다.
+
+    extra_scan_texts: final.md 본문 외에 추가로 스캔할 텍스트(agentic_task가 생성한
+    파일 내용). 이 패턴은 진짜 산출물이 텍스트가 아니라 파일이라, 파일을 안 보면
+    "Safety는 어떤 경로에서도 생략하지 않는다"(Section 12.1)가 형해화된다. 기본값이
+    비어 있어 나머지 세 패턴의 동작은 그대로다.
     """
     formatted_content = f"{content_prefix}{final_content.rstrip()}\n"
-    safety_obs = safety.check(formatted_content)
+    safety_obs = _check_safety(formatted_content, extra_scan_texts)
     run_store.write_markdown(
         run_dir, "safety.md", f"# Safety Check\n\n- status: {safety_obs.status}\n\n{safety_obs.summary}\n"
     )
@@ -619,6 +773,25 @@ def _finalize(
         f"{stage} run 완료" + (f" (경고 {len(errors)}건 — 나머지로 계속 진행함)" if errors else "")
     )
     return Observation(status=status, summary=summary, artifacts=["final.md"], next_actions=["continue"])
+
+
+def _check_safety(content: str, extra_scan_texts: Sequence[str]) -> Observation:
+    """final.md 본문과 추가 대상(agentic_task 생성 파일)을 모두 스캔해 하나의 판정으로 합친다.
+
+    스캔을 나눠서 하는 이유: 파일들을 그냥 이어붙여 한 번에 검사하면 어느 파일이
+    걸렸는지 알 수 없어 사람 검토(safety_review.json의 note)가 무의미해진다.
+    """
+    observations = [safety.check(content)] + [safety.check(text) for text in extra_scan_texts]
+    failures = [obs for obs in observations if obs.status == "error"]
+    if not failures:
+        return observations[0]
+
+    return Observation(
+        status="error",
+        summary="; ".join(obs.summary for obs in failures),
+        artifacts=[],
+        next_actions=["ask_user"],
+    )
 
 
 def _enter_safety_review(

@@ -50,6 +50,9 @@ class HarnessConfig(BaseModel):
     - max_refinement_rounds: iterative_refinement의 라운드 상한(ADR 0006).
       라운드마다 generator+evaluator 2회 호출이 발생하므로 비용에 직결된다 —
       최악의 경우 LLM 호출 수는 이 값 × 2 (+재시도).
+    - max_agent_turns: agentic_task에서 에이전트가 도구를 호출하며 진행할 수
+      있는 최대 턴 수(ADR 0007). 구독 사용량과 "얼마나 많은 파일을 만들 수
+      있는가"에 직결되는 값이라 코드 밖으로 뺐다.
     """
 
     candidate_models: list[str] = Field(default_factory=lambda: ["claude", "codex", "gemini"])
@@ -58,6 +61,7 @@ class HarnessConfig(BaseModel):
     delegation_role_models: dict[str, str] = Field(default_factory=dict)
     max_subscription_candidates: int = 1
     max_refinement_rounds: int = 3
+    max_agent_turns: int = 8
 
 
 def load_config(path: Path | None = None) -> HarnessConfig:

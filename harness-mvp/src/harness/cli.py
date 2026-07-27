@@ -56,7 +56,7 @@ from typing import Callable, Iterable, Sequence
 
 from providers.api_provider import GeminiApiProvider
 from providers.base import Provider
-from providers.cli_subscription_provider import ClaudeCliProvider, CodexCliProvider
+from providers.cli_subscription_provider import ClaudeAgentProvider, ClaudeCliProvider, CodexCliProvider
 
 from . import dashboard, failure_analysis, live_status, orchestrator
 from .config import HarnessConfig, load_config
@@ -119,6 +119,14 @@ def _default_providers(models: Sequence[str], config: HarnessConfig) -> dict[str
     )
 
     providers[orchestrator.JUDGE_PROVIDER_KEY] = _CANDIDATE_PROVIDER_REGISTRY[config.judge_model]("judge")
+
+    # agentic_task 전용 에이전트 provider (ADR 0007). 모델 레지스트리를 안 거치고
+    # claude로 고정한다 — codex는 stream 이벤트 형식이 달라 이번 범위 밖이고,
+    # gemini는 애초에 CLI 구독 모드가 없다(모듈 docstring 참고). 이 provider는
+    # AGENT_PROVIDER_KEY로만 등록돼 다른 패턴에는 절대 안 섞인다.
+    providers[orchestrator.AGENT_PROVIDER_KEY] = ClaudeAgentProvider(
+        ProviderConfig(provider_id="agent", model_id="claude-cli", auth_mode="cli_subscription")
+    )
     return providers
 
 
@@ -130,6 +138,7 @@ def _providers_from_args(args: argparse.Namespace) -> dict[str, Provider]:
     config = load_config()
     orchestrator.MAX_SUBSCRIPTION_CANDIDATES = config.max_subscription_candidates
     orchestrator.MAX_REFINEMENT_ROUNDS = config.max_refinement_rounds
+    orchestrator.MAX_AGENT_TURNS = config.max_agent_turns
     models = _parse_models(args.models, config.candidate_models)
     return _default_providers(models, config)
 

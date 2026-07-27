@@ -2,8 +2,9 @@
 
 파일 기반 실행-평가 하네스. 여러 LLM으로 후보를 만들어 비교/합성하거나
 (fan_out_judge), 역할별로 순차 위임하거나(hierarchical_delegation), 생성-평가
-피드백 루프로 반복 개선한다(iterative_refinement, opt-in 전용 — ADR 0006).
-코드는 `harness-mvp/`.
+피드백 루프로 반복 개선하거나(iterative_refinement — ADR 0006), 자율 에이전트에게
+도구를 열어주고 그 실행을 감싼다(agentic_task — ADR 0007). 뒤 두 패턴은 opt-in
+전용이고, agentic_task는 사람 승인 필수. 코드는 `harness-mvp/`.
 
 **시작할 때 읽을 순서**
 

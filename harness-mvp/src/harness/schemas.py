@@ -22,7 +22,7 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
-TeamPattern = Literal["fan_out_judge", "hierarchical_delegation", "iterative_refinement"]
+TeamPattern = Literal["fan_out_judge", "hierarchical_delegation", "iterative_refinement", "agentic_task"]
 AuthMode = Literal["api_key", "cli_subscription"]
 RiskLevel = Literal["low", "medium", "high"]
 StepStatus = Literal["success", "error"]
@@ -138,6 +138,52 @@ class RefinementRound(BaseModel):
     feedback: str
     latency_ms: Optional[int] = None
     cost_usd: Optional[float] = None
+
+
+class AgentToolUse(BaseModel):
+    """에이전트가 실제로 호출한 도구 하나 (agentic_task 전용, ADR 0007).
+
+    다른 패턴에는 없는 개념이다 — 이 패턴에서만 모델이 텍스트를 내놓는 대신
+    도구를 호출해 파일을 만든다. target은 도구 입력에서 뽑은 짧은 식별자
+    (파일 도구면 파일 경로), 없으면 None.
+    """
+
+    tool: str  # 예: "Write", "Read", "Edit"
+    target: Optional[str] = None
+
+
+class AgentTurn(BaseModel):
+    """에이전트 루프의 턴 하나. agent_turns.json에 목록으로 저장된다.
+
+    "하네스가 자율 에이전트를 감싼다"는 건 이 기록이 남는다는 뜻이다 — 에이전트가
+    무슨 판단으로 어떤 도구를 썼는지 사후에 재현/감사할 수 있어야 한다.
+    """
+
+    turn_index: int
+    text: str = ""
+    tool_uses: list[AgentToolUse] = Field(default_factory=list)
+
+
+class AgentRunResult(BaseModel):
+    """agent_runner.run_agent_task()의 산출물 (agentic_task 전용).
+
+    stop_reason: "completed"(에이전트가 스스로 종료) / "max_turns"(턴 상한 도달 —
+    실패가 아니라 partial 승격 대상) / "error"(에이전트가 오류로 종료).
+    produced_files는 CLI 보고가 아니라 실행 후 워크스페이스를 실제로 스캔한
+    결과다(에이전트 자기 보고를 신뢰하지 않는다).
+    """
+
+    turns: list[AgentTurn] = Field(default_factory=list)
+    final_text: str = ""
+    produced_files: list[str] = Field(default_factory=list)
+    # 안전 경계가 실제로 막아낸 시도들(CLI의 permission_denials). 비어 있는 게
+    # 정상이지만, 값이 있다는 건 에이전트가 경계 밖으로 나가려 했다는 뜻이라
+    # 감사 증거로 남긴다 — 경계가 "설정돼 있다"가 아니라 "작동했다"의 근거다.
+    blocked_tool_uses: list[AgentToolUse] = Field(default_factory=list)
+    num_turns: Optional[int] = None
+    latency_ms: Optional[int] = None
+    cost_usd: Optional[float] = None  # auth_mode="cli_subscription"이면 None (구독 사용량은 $ 집계 밖)
+    stop_reason: Literal["completed", "max_turns", "error"] = "completed"
 
 
 class RunMetrics(BaseModel):

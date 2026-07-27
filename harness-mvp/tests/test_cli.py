@@ -63,6 +63,15 @@ class DefaultProvidersTest(unittest.TestCase):
         for role in ("research", "design_review", "implementation_review"):
             self.assertIn(f"{role}-mock", providers)
 
+    def test_agent_provider_registered_and_capable_of_agent_mode(self) -> None:
+        """agentic_task용 에이전트 provider(ADR 0007)는 후보 모델 선택과 무관하게
+        전용 예약 키로만 등록된다 — 일반 텍스트 생성 자리에 섞이면 안 되기 때문."""
+        providers = cli._default_providers(("gemini",), _DEFAULT_CONFIG)
+
+        agent = providers[orchestrator.AGENT_PROVIDER_KEY]
+        self.assertTrue(hasattr(agent, "run_agent"))
+        self.assertEqual(agent.model_id, "claude-cli")  # codex/gemini는 이번 범위 밖
+
     def test_judge_model_config_selects_backend(self) -> None:
         config = HarnessConfig(judge_model="claude")
 
@@ -134,6 +143,15 @@ class LoadConfigTest(unittest.TestCase):
         self.assertEqual(config.max_subscription_candidates, 2)
         self.assertEqual(config.judge_model, "gemini")  # 파일에 없는 필드는 기본값
         self.assertEqual(config.delegation_role_models, {})  # 파일에 없는 필드는 기본값(빈 dict)
+
+    def test_reads_max_agent_turns_from_file(self) -> None:
+        config_path = self.tmp_dir / "config.json"
+        config_path.write_text(json.dumps({"max_agent_turns": 8}), encoding="utf-8")
+
+        config = load_config(config_path)
+
+        self.assertEqual(config.max_agent_turns, 8)
+        self.assertEqual(config.max_refinement_rounds, 3)  # 파일에 없는 필드는 기본값
 
     def test_reads_max_refinement_rounds_from_file(self) -> None:
         config_path = self.tmp_dir / "config.json"

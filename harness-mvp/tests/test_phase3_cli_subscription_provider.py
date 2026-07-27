@@ -7,8 +7,10 @@ harness-implementation-plan-ko.md Section 10을 검증한다. 실제 claude/code
 """
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -18,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from harness.schemas import ProviderConfig  # noqa: E402
 from providers.base import ProviderError  # noqa: E402
 from providers.cli_subscription_provider import (  # noqa: E402
+    ClaudeAgentProvider,
     ClaudeCliProvider,
     CodexCliProvider,
     _extract_codex_output_tokens,
@@ -143,6 +146,161 @@ class ClaudeCliProviderTest(unittest.TestCase):
         _, kwargs = mock_run.call_args
         self.assertIn("cwd", kwargs)
         self.assertNotEqual(Path(kwargs["cwd"]).resolve(), Path.cwd().resolve())
+
+
+def agent_stream(*, subtype: str = "success", is_error: bool = False, num_turns: int = 2) -> str:
+    """claude CLI의 stream-json(JSONL) 출력을 흉내낸다 (ADR 0007).
+
+    실제 형식대로 배너 줄 + system/init + assistant(도구 호출 포함) + result를
+    섞어서, 파서가 필요한 것만 골라내는지 확인할 수 있게 한다.
+    """
+    lines = [
+        "Reading prompt from stdin...",  # JSON이 아닌 배너 줄
+        '{"type":"system","subtype":"init","tools":["Read","Write"]}',
+        '{"type":"assistant","parent_tool_use_id":null,"message":{"content":['
+        '{"type":"text","text":"파일을 만들겠습니다"},'
+        '{"type":"tool_use","name":"Write","input":{"file_path":"guide.md","content":"본문"}}]}}',
+        '{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}',
+        '{"type":"assistant","parent_tool_use_id":null,"message":{"content":['
+        '{"type":"text","text":"완료했습니다"}]}}',
+        '{"type":"result","subtype":"%s","is_error":%s,"num_turns":%d,"result":"작업 완료"}'
+        % (subtype, "true" if is_error else "false", num_turns),
+    ]
+    return "\n".join(lines)
+
+
+class ClaudeAgentProviderTest(unittest.TestCase):
+    """agentic_task용 에이전트 모드 (ADR 0007). 실제 CLI는 호출하지 않는다."""
+
+    def setUp(self) -> None:
+        self.provider = ClaudeAgentProvider(make_config("claude-cli"))
+        which_patcher = patch("providers.cli_subscription_provider.shutil.which", return_value="/fake/bin/claude")
+        which_patcher.start()
+        self.addCleanup(which_patcher.stop)
+        self.workspace = Path(tempfile.mkdtemp(prefix="agent-ws-"))
+        self.addCleanup(shutil.rmtree, self.workspace, ignore_errors=True)
+
+    def run_agent(self, mock_run, stdout: str, *, returncode: int = 0):
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["claude"], returncode=returncode, stdout=stdout, stderr=""
+        )
+        return self.provider.run_agent("학습 자료를 만들어줘", self.workspace, max_turns=5)
+
+    @patch("providers.cli_subscription_provider.subprocess.run")
+    def test_parses_turns_tool_uses_and_result(self, mock_run) -> None:
+        result = self.run_agent(mock_run, agent_stream())
+
+        self.assertEqual(result.stop_reason, "completed")
+        self.assertEqual(result.final_text, "작업 완료")
+        self.assertEqual(result.num_turns, 2)
+        self.assertEqual([t.turn_index for t in result.turns], [1, 2])
+        self.assertEqual(result.turns[0].tool_uses[0].tool, "Write")
+        self.assertEqual(result.turns[0].tool_uses[0].target, "guide.md")
+        self.assertEqual(result.turns[1].tool_uses, [])  # 텍스트만 있는 턴
+        self.assertIsNone(result.cost_usd)  # 구독 모드는 $ 집계 대상 아님
+
+    @patch("providers.cli_subscription_provider.subprocess.run")
+    def test_tool_target_excludes_file_body(self, mock_run) -> None:
+        """도구 입력 전체가 아니라 대상(파일 경로)만 기록해야 한다 — 파일 본문까지
+        넣으면 agent_turns.json이 산출물 사본으로 비대해진다."""
+        result = self.run_agent(mock_run, agent_stream())
+
+        self.assertNotIn("본문", str(result.turns[0].tool_uses[0].model_dump()))
+
+    @patch("providers.cli_subscription_provider.subprocess.run")
+    def test_max_turns_is_not_an_exception(self, mock_run) -> None:
+        """턴 상한 도달 시 CLI는 오류로 종료하지만, 그때까지 만든 파일은 유효하므로
+        예외가 아니라 stop_reason으로 돌려줘야 한다(partial 승격 대상)."""
+        result = self.run_agent(
+            mock_run, agent_stream(subtype="error_max_turns", is_error=True), returncode=1
+        )
+
+        self.assertEqual(result.stop_reason, "max_turns")
+        self.assertEqual(result.turns[0].tool_uses[0].tool, "Write")  # 기록은 그대로 남음
+
+    @patch("providers.cli_subscription_provider.subprocess.run")
+    def test_agent_error_reported_as_stop_reason(self, mock_run) -> None:
+        result = self.run_agent(mock_run, agent_stream(subtype="error_during_execution", is_error=True))
+
+        self.assertEqual(result.stop_reason, "error")
+
+    @patch("providers.cli_subscription_provider.subprocess.run")
+    def test_missing_result_message_raises(self, mock_run) -> None:
+        """result 메시지가 없다 = 에이전트가 시작조차 못 했다는 뜻이라 진짜 실패다."""
+        with self.assertRaises(ProviderError):
+            self.run_agent(mock_run, '{"type":"system","subtype":"init"}', returncode=1)
+
+    @patch("providers.cli_subscription_provider.subprocess.run")
+    def test_safety_boundaries_passed_as_cli_arguments(self, mock_run) -> None:
+        """회귀 테스트(2026-07-27 첫 e2e에서 실제로 뚫린 것): 안전 경계는 세 인자가
+        **전부** 있어야 강제된다. 처음엔 `--allowedTools "Read,Write,Edit"`만 걸었는데
+        에이전트가 Bash로 저장소를 뒤지고 워크스페이스 밖 CLAUDE.md를 읽었다 —
+        print 모드에서 --allowedTools는 사전 승인일 뿐 제한이 아니었다.
+
+        하나라도 빠지면 경계가 무너지므로 셋 다 고정한다:
+        1. --permission-mode dontAsk (허용 규칙에 없으면 거부)
+        2. 경로 스코프 allow 규칙 (도구 이름만 쓰면 cwd 밖도 열림)
+        3. --disallowedTools bare 이름 (위험 도구를 컨텍스트에서 제거)
+        """
+        self.run_agent(mock_run, agent_stream())
+
+        args = mock_run.call_args.args[0]
+        kwargs = mock_run.call_args.kwargs
+        self.assertEqual(Path(kwargs["cwd"]).resolve(), self.workspace.resolve())
+        self.assertNotIn("--add-dir", args)  # 워크스페이스 밖 접근 경로를 열지 않음
+
+        # 1) 기본 거부 모드 — 이게 없으면 나머지 두 개도 무의미하다
+        self.assertEqual(args[args.index("--permission-mode") + 1], "dontAsk")
+
+        # 2) 허용 규칙은 반드시 경로로 스코프돼야 한다
+        allowed = args[args.index("--allowedTools") + 1]
+        self.assertEqual(allowed, "Read(./**),Write(./**),Edit(./**)")
+        for rule in allowed.split(","):
+            self.assertIn("(./**)", rule)  # 도구 이름만 있는 무제한 규칙 금지
+
+        # 3) 위험 도구는 컨텍스트에서 제거
+        disallowed = args[args.index("--disallowedTools") + 1].split(",")
+        for tool in ("Bash", "Glob", "Grep", "WebFetch", "WebSearch", "Task"):
+            self.assertIn(tool, disallowed)
+
+        self.assertIn("--max-turns", args)
+        self.assertEqual(args[args.index("--max-turns") + 1], "5")
+        self.assertIn("stream-json", args)  # 턴별 관측이 가능한 형식
+        self.assertEqual(kwargs.get("input"), "학습 자료를 만들어줘")  # 프롬프트는 stdin
+
+    @patch("providers.cli_subscription_provider.subprocess.run")
+    def test_records_blocked_tool_uses_from_permission_denials(self, mock_run) -> None:
+        """경계가 막아낸 시도를 감사 증거로 남기는지 확인 — 2026-07-27 e2e에서
+        에이전트가 실제로 Bash를 시도했다(경계 밖 도구를 노리는 건 예외가 아니라
+        관측된 행동이다). "설정돼 있다"가 아니라 "작동했다"의 근거가 된다."""
+        stream = agent_stream().replace(
+            '"result":"작업 완료"',
+            '"result":"작업 완료","permission_denials":['
+            '{"tool_name":"Bash","tool_input":{"command":"find / -name secrets"}}]',
+        )
+
+        result = self.run_agent(mock_run, stream)
+
+        self.assertEqual(len(result.blocked_tool_uses), 1)
+        self.assertEqual(result.blocked_tool_uses[0].tool, "Bash")
+        self.assertIn("find", result.blocked_tool_uses[0].target)
+
+    @patch("providers.cli_subscription_provider.subprocess.run")
+    def test_no_denials_means_empty_blocked_list(self, mock_run) -> None:
+        result = self.run_agent(mock_run, agent_stream())
+
+        self.assertEqual(result.blocked_tool_uses, [])
+
+    @patch("providers.cli_subscription_provider.subprocess.run")
+    def test_timeout_raises_provider_error(self, mock_run) -> None:
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="claude", timeout=600.0)
+
+        with self.assertRaises(ProviderError):
+            self.provider.run_agent("작업", self.workspace, max_turns=5)
+
+    def test_still_usable_as_plain_provider(self) -> None:
+        """같은 바이너리의 두 모드 — generate()(단발 완성)도 그대로 동작해야 한다."""
+        self.assertTrue(callable(self.provider.generate))
 
 
 class CodexCliProviderTest(unittest.TestCase):

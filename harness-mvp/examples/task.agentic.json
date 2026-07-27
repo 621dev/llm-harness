@@ -1,0 +1,5 @@
+{
+  "task_id": "agentic-demo",
+  "prompt": "리눅스 서버 운영 기초를 배우는 초급 엔지니어용 학습 자료를 만들어줘. 프로세스 관리, 네트워크, 로그 관리 세 주제를 각각 별도의 마크다운 파일로 작성하고, 각 파일에 실무 예시를 포함해줘.",
+  "constraints": ["team_pattern:agentic_task"]
+}

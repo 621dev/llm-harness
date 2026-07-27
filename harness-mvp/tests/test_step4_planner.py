@@ -96,6 +96,32 @@ class PlannerTest(unittest.TestCase):
         self.assertEqual(plan.delegation_chain, [])
         self.assertEqual(plan.task_type, "research")  # task_type/rubric은 router 분류를 유지
 
+    def test_agentic_task_forces_high_risk_for_approval_gate(self) -> None:
+        # 이 패턴만 실제 파일을 만드는 부수 효과가 있어 사람 승인이 필수다(ADR 0007).
+        # 프롬프트에 고위험 키워드가 전혀 없어도 high로 올라가야 한다.
+        task = make_task(
+            "t-10", "학습 자료를 파일로 만들어줘", constraints=["team_pattern:agentic_task"]
+        )
+
+        plan = planner.create_plan(task)
+
+        self.assertEqual(plan.team_pattern, "agentic_task")
+        self.assertEqual(plan.risk_level, "high")
+        self.assertIsNone(plan.num_candidates)
+        self.assertEqual(plan.delegation_chain, [])
+
+    def test_explicit_risk_override_beats_agentic_task_default(self) -> None:
+        # 테스트/자동화에서 승인 게이트를 우회해 실행 경로만 검증할 수 있어야 한다.
+        task = make_task(
+            "t-11",
+            "학습 자료를 파일로 만들어줘",
+            constraints=["team_pattern:agentic_task", "risk_level:medium"],
+        )
+
+        plan = planner.create_plan(task)
+
+        self.assertEqual(plan.risk_level, "medium")
+
     def test_team_pattern_override_with_unknown_value_is_ignored(self) -> None:
         task = make_task(
             "t-9", "경쟁사 가격 정책을 리서치해줘", constraints=["team_pattern:없는패턴"]

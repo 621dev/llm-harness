@@ -27,6 +27,13 @@ MVP 완료 후 세 번째 패턴이 추가됐다(ADR 0006, 2026-07-27).
    반복 개선이 필요한 작업에 쓰며, 라운드마다 LLM 2회 호출이 발생하는 고비용 패턴이라
    키워드 자동 라우팅 없이 `constraints: ["team_pattern:iterative_refinement"]` opt-in으로만
    진입한다.
+4. **Agentic Task 패턴** (ADR 0007): 앞의 셋과 근본적으로 다르다 — 하네스가 루프를
+   돌리는 게 아니라, **자율 에이전트(claude CLI)가 스스로 도구를 호출하며 진행**하고
+   하네스는 그 실행을 감싼다(경로 격리, 도구 제거, 턴 상한, 턴별 행동 기록, 차단
+   시도 감사, Safety, 사람 승인). 산출물이 텍스트가 아니라 실제 파일이어야 하는
+   작업에 쓴다. 되돌리기 어려운 부수 효과가 있어 opt-in + `risk_level="high"`
+   강제(승인 필수)다. 안전 경계는 `--permission-mode dontAsk` + 경로 스코프 allow
+   규칙 + `--disallowedTools` **세트로만 강제된다**(실측 근거는 ADR 0007).
 
 패턴들은 목적이 다르므로 하나로 합치지 않고, `team_pattern` 필드로 분기해서 필요한 경우에만
 해당 비용을 지불하도록 설계한다. (완전 통합안은 모든 작업에 두 단계 비용을 강제해
@@ -79,6 +86,8 @@ _workspace/
         step-2-design-review.md
     judging.json                 # Fan-out/Judge 패턴에서만 생성
     refinement.json               # Iterative Refinement 패턴에서만 생성 (라운드별 기록, ADR 0006)
+    agent_turns.json               # Agentic Task 패턴에서만 생성 (에이전트 턴별 도구 호출 기록, ADR 0007)
+    artifacts/agent_workspace/      # Agentic Task 패턴 전용 — 에이전트가 파일을 쓸 수 있는 유일한 위치
     final.md
     safety.md
     metrics.json
@@ -89,7 +98,7 @@ _workspace/
 
 - `TaskInput`: task_id, prompt, constraints, created_at
 - `Plan`: task_type, risk_level, rubric(list[str]),
-  `team_pattern: Literal["fan_out_judge", "hierarchical_delegation", "iterative_refinement"]`,
+  `team_pattern: Literal["fan_out_judge", "hierarchical_delegation", "iterative_refinement", "agentic_task"]`,
   `num_candidates`(fan_out_judge 전용), `delegation_chain: list[DelegationStep]`(hierarchical_delegation 전용)
 - `DelegationStep`: role(예: "research", "design_review"), provider_id, input_ref, output_ref, status
 - `ProviderConfig`: provider_id, `auth_mode: Literal["api_key", "cli_subscription"]`, model_id
@@ -181,6 +190,14 @@ def run(task):
                 break
             prompt = build_refinement_prompt(task.prompt, content, verdict.feedback)
         final = content   # 상한까지 미통과면 마지막 시도를 partial 승격(Section 6과 동일 철학)
+    elif plan.team_pattern == "agentic_task":            # ADR 0007 (2026-07-27 추가)
+        # 하네스가 루프를 돌리지 않는다 — 에이전트가 스스로 도구를 호출하며 진행하고,
+        # 하네스는 경계(작업공간/도구 허용목록/턴 상한)와 기록만 책임진다.
+        result = agent_runner.run_agent_task(agent_provider, task.prompt, run_dir,
+                                             max_turns=max_agent_turns)
+        write_artifact(run_id, "agent_turns.json", result.turns)   # 에이전트가 무엇을 했는지
+        final = render_report(result)   # 진짜 산출물은 agent_workspace/ 안의 파일
+        extra_scan_texts = read_produced_files(result)   # 파일 내용도 Safety 스캔 대상
 
     safety_result = safety.check(final)
     write_artifact(run_id, "final.md", final)
@@ -197,10 +214,13 @@ Planner가 `team_pattern`을 정하는 기본 규칙(초기엔 LLM 호출 없이
 | architecture design, content generation, 비교가 필요한 작업 | fan_out_judge |
 | 분류 애매 | 기본값 fan_out_judge + ask_user로 확인 |
 
-`iterative_refinement`는 이 표(키워드 자동 라우팅)에 없다 — 라운드마다 LLM 2회 호출이
-발생하는 고비용 패턴이라 실수로 걸리지 않게, `TaskInput.constraints`의
-`"team_pattern:<pattern>"` 명시적 override(planner의 `risk_level:` override와 대칭)로만
-진입한다(ADR 0006). 이 override는 어느 패턴에나 쓸 수 있고 router 분류보다 우선한다.
+`iterative_refinement`와 `agentic_task`는 이 표(키워드 자동 라우팅)에 없다 — 전자는
+라운드마다 LLM 2회 호출이 발생하는 고비용 패턴이고(ADR 0006), 후자는 실제 파일을
+만드는 되돌리기 어려운 부수 효과가 있어서(ADR 0007) 실수로 걸리면 안 되기 때문이다.
+`TaskInput.constraints`의 `"team_pattern:<pattern>"` 명시적 override(planner의
+`risk_level:` override와 대칭)로만 진입한다. 이 override는 어느 패턴에나 쓸 수 있고
+router 분류보다 우선한다. `agentic_task`는 추가로 planner가 `risk_level="high"`를
+강제해 Section 12.2의 사람 승인 체크포인트를 반드시 거치게 한다.
 
 `router.py`는 이 규칙 판단을 Planner LLM 호출 이전에 저비용으로 먼저 걸러내는 선택적 훅이다.
 명백한 케이스(예: "리서치해줘")는 LLM 호출 없이 바로 라우팅하고, 애매한 경우만 Planner에 위임한다.

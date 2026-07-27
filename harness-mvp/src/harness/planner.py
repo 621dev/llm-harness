@@ -38,7 +38,7 @@ _HIGH_RISK_KEYWORDS = ("배포", "삭제", "프로덕션", "production", "결제
 _MEDIUM_RISK_KEYWORDS = ("설계", "아키텍처", "정책", "계약")
 _RISK_OVERRIDE_PREFIX = "risk_level:"
 _TEAM_PATTERN_OVERRIDE_PREFIX = "team_pattern:"
-_VALID_TEAM_PATTERNS = ("fan_out_judge", "hierarchical_delegation", "iterative_refinement")
+_VALID_TEAM_PATTERNS = ("fan_out_judge", "hierarchical_delegation", "iterative_refinement", "agentic_task")
 
 
 def create_plan(task: TaskInput) -> Plan:
@@ -56,6 +56,23 @@ def create_plan(task: TaskInput) -> Plan:
 
     risk_level = _infer_risk_level(task)
     rubric = _DEFAULT_RUBRICS.get(task_type, list(_DEFAULT_RUBRIC))
+
+    if team_pattern == "agentic_task" and not _has_explicit_risk_override(task):
+        # 이 패턴만 유일하게 텍스트가 아니라 실제 파일을 만드는 부수 효과가 있다
+        # (ADR 0007). 되돌리기 어려운 행동은 사람이 먼저 봐야 하므로 기존 승인
+        # 체크포인트(Section 12.2)를 반드시 통과하도록 위험도를 올린다. 명시적
+        # "risk_level:" override가 있으면 그쪽이 우선한다 — 테스트가 승인 게이트를
+        # 우회해 실행 경로만 검증할 수 있어야 하기 때문.
+        risk_level = "high"
+
+    if team_pattern == "agentic_task":
+        return Plan(
+            task_id=task.task_id,
+            task_type=task_type,
+            risk_level=risk_level,
+            rubric=rubric,
+            team_pattern=team_pattern,
+        )
 
     if team_pattern == "fan_out_judge":
         return Plan(
@@ -85,6 +102,14 @@ def create_plan(task: TaskInput) -> Plan:
         rubric=rubric,
         team_pattern=team_pattern,
         delegation_chain=delegation_chain,
+    )
+
+
+def _has_explicit_risk_override(task: TaskInput) -> bool:
+    return any(
+        constraint.startswith(_RISK_OVERRIDE_PREFIX)
+        and constraint[len(_RISK_OVERRIDE_PREFIX):] in ("low", "medium", "high")
+        for constraint in task.constraints
     )
 
 

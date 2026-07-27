@@ -42,7 +42,9 @@ _ALLOWED_INTERNAL_IMPORTS: dict[str, set[str]] = {
     "planner": {"router", "schemas"},
     "judge": {"model_runner", "schemas"},
     "subagent_runner": {"run_store", "model_runner", "schemas"},
+    "agent_runner": {"run_store", "schemas"},
     "orchestrator": {
+        "agent_runner",
         "judge",
         "live_status",
         "model_runner",
