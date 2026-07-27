@@ -13,15 +13,22 @@
 ## 1. 목표
 
 Planner가 작업 성격에 따라 팀 패턴을 고르고, Orchestrator가 그 패턴에 맞는 flow를 실행하는
-파일 기반 실행-평가 하네스의 MVP를 만든다. 지원하는 패턴은 두 가지다.
+파일 기반 실행-평가 하네스의 MVP를 만든다. 최초 계획의 패턴은 두 가지였고,
+MVP 완료 후 세 번째 패턴이 추가됐다(ADR 0006, 2026-07-27).
 
 1. **Fan-out/Judge 패턴**: 여러 모델이 독립적으로 후보를 생성하고, Judge가 비교 평가하고,
    Synthesizer가 최종 답을 합성한다. 품질 비교가 중요한 작업(설계안 검토, 콘텐츠 생성)에 쓴다.
 2. **Hierarchical Delegation 패턴**: 컨텍스트를 격리한 서브에이전트가 리서치·설계 리뷰 등
    역할별로 특화된 모델에 순차적으로 위임하고, 요약된 결과만 메인 Orchestrator로 반환한다.
    역할 분업과 컨텍스트/비용 절약이 중요한 작업(리서치, 순차 검토)에 쓴다.
+3. **Iterative Refinement 패턴** (ADR 0006): generator 1개가 생성 → evaluator가 rubric
+   합격 판정 + 수정 피드백 → 불합격이면 피드백을 반영해 재생성을 반복한다(라운드 상한
+   `max_refinement_rounds`, 기본 3 — config.json). 단발 생성으로 rubric을 채우기 어려워
+   반복 개선이 필요한 작업에 쓰며, 라운드마다 LLM 2회 호출이 발생하는 고비용 패턴이라
+   키워드 자동 라우팅 없이 `constraints: ["team_pattern:iterative_refinement"]` opt-in으로만
+   진입한다.
 
-두 패턴은 목적이 다르므로 하나로 합치지 않고, `team_pattern` 필드로 분기해서 필요한 경우에만
+패턴들은 목적이 다르므로 하나로 합치지 않고, `team_pattern` 필드로 분기해서 필요한 경우에만
 해당 비용을 지불하도록 설계한다. (완전 통합안은 모든 작업에 두 단계 비용을 강제해
 cost per success 관점에서 비효율적이라 기각했다.)
 
@@ -71,6 +78,7 @@ _workspace/
         step-1-research.md
         step-2-design-review.md
     judging.json                 # Fan-out/Judge 패턴에서만 생성
+    refinement.json               # Iterative Refinement 패턴에서만 생성 (라운드별 기록, ADR 0006)
     final.md
     safety.md
     metrics.json
@@ -81,12 +89,16 @@ _workspace/
 
 - `TaskInput`: task_id, prompt, constraints, created_at
 - `Plan`: task_type, risk_level, rubric(list[str]),
-  `team_pattern: Literal["fan_out_judge", "hierarchical_delegation"]`,
+  `team_pattern: Literal["fan_out_judge", "hierarchical_delegation", "iterative_refinement"]`,
   `num_candidates`(fan_out_judge 전용), `delegation_chain: list[DelegationStep]`(hierarchical_delegation 전용)
 - `DelegationStep`: role(예: "research", "design_review"), provider_id, input_ref, output_ref, status
 - `ProviderConfig`: provider_id, `auth_mode: Literal["api_key", "cli_subscription"]`, model_id
 - `Candidate`: model_id, content, tokens, latency_ms, cost_usd(auth_mode="api_key"일 때만 채움), status(success/error)
 - `Judging`: scores(candidate, score, strengths, weaknesses), recommended_strategy, winner
+- `RefinementVerdict`/`RefinementRound` (iterative_refinement 전용, ADR 0006):
+  verdict는 `judge.check_pass()`의 합격 판정(passed, feedback), round는 라운드 하나의
+  기록(round_index, content, passed, feedback, latency_ms, cost_usd — `refinement.json`에
+  목록으로 저장)
 - `RunMetrics`: latency_ms, estimated_cost_usd(nullable), `quota_usage_pct`(auth_mode="cli_subscription"일 때만 채움),
   completed_candidates_or_steps, failed_candidates_or_steps
 - `Observation` (공용 contract): status, summary, artifacts, next_actions
@@ -159,6 +171,16 @@ def run(task):
             chain_results.append(obs)
         final = chain_results[-1]   # 마지막 위임 결과가 최종안
         judging = None               # 이 패턴에서는 Judge 단계 자체가 없음
+    elif plan.team_pattern == "iterative_refinement":   # ADR 0006 (2026-07-27 추가)
+        prompt = task.prompt
+        for round_index in range(max_refinement_rounds):
+            content = model_runner.generate(prompt)
+            verdict = judge.check_pass(content, plan.rubric)   # 합격 판정 + 수정 피드백
+            record_round(run_id, content, verdict)              # refinement.json 누적
+            if verdict.passed:
+                break
+            prompt = build_refinement_prompt(task.prompt, content, verdict.feedback)
+        final = content   # 상한까지 미통과면 마지막 시도를 partial 승격(Section 6과 동일 철학)
 
     safety_result = safety.check(final)
     write_artifact(run_id, "final.md", final)
@@ -174,6 +196,11 @@ Planner가 `team_pattern`을 정하는 기본 규칙(초기엔 LLM 호출 없이
 | sequential_review (설계 리뷰 → 구현 리뷰 등 단계적 검토) | hierarchical_delegation |
 | architecture design, content generation, 비교가 필요한 작업 | fan_out_judge |
 | 분류 애매 | 기본값 fan_out_judge + ask_user로 확인 |
+
+`iterative_refinement`는 이 표(키워드 자동 라우팅)에 없다 — 라운드마다 LLM 2회 호출이
+발생하는 고비용 패턴이라 실수로 걸리지 않게, `TaskInput.constraints`의
+`"team_pattern:<pattern>"` 명시적 override(planner의 `risk_level:` override와 대칭)로만
+진입한다(ADR 0006). 이 override는 어느 패턴에나 쓸 수 있고 router 분류보다 우선한다.
 
 `router.py`는 이 규칙 판단을 Planner LLM 호출 이전에 저비용으로 먼저 걸러내는 선택적 훅이다.
 명백한 케이스(예: "리서치해줘")는 LLM 호출 없이 바로 라우팅하고, 애매한 경우만 Planner에 위임한다.

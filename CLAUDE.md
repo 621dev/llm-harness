@@ -1,7 +1,9 @@
 # Multi-LLM Harness
 
-파일 기반 실행-평가 하네스. 여러 LLM(fan_out_judge/hierarchical_delegation)로 후보를
-만들고 비교/합성하거나 역할별로 순차 위임한다. 코드는 `harness-mvp/`.
+파일 기반 실행-평가 하네스. 여러 LLM으로 후보를 만들어 비교/합성하거나
+(fan_out_judge), 역할별로 순차 위임하거나(hierarchical_delegation), 생성-평가
+피드백 루프로 반복 개선한다(iterative_refinement, opt-in 전용 — ADR 0006).
+코드는 `harness-mvp/`.
 
 **시작할 때 읽을 순서**
 

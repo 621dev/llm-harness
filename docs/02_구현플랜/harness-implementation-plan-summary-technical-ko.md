@@ -12,6 +12,7 @@ flow를 실행하는 파일 기반 실행-평가 하네스의 MVP.
 | --- | --- | --- |
 | `fan_out_judge` | 품질 비교 | 여러 모델 독립 후보 생성 → Judge 비교 → Synthesizer 합성 |
 | `hierarchical_delegation` | 역할 분업/비용 절약 | 컨텍스트 격리 서브에이전트가 역할별 모델에 순차 위임 |
+| `iterative_refinement` (ADR 0006, 2026-07-27 추가) | 반복 개선 | 생성 → rubric 합격 판정 + 피드백 → 재생성 반복(상한 `max_refinement_rounds`, opt-in 전용) |
 
 완전 통합안(모든 작업에 두 단계 강제)은 cost per success 관점에서 기각, 분기 방식으로 결정.
 
@@ -24,7 +25,7 @@ src/harness/
   router.py             # 저비용 사전 분류 훅 (선택)
   model_runner.py         # fan_out_judge: 독립 후보 생성
   subagent_runner.py       # hierarchical_delegation: 컨텍스트 격리 위임
-  judge.py / synthesizer.py  # fan_out_judge 전용
+  judge.py / synthesizer.py  # judge: fan_out_judge 비교 평가 + iterative_refinement 합격 판정 / synthesizer: fan_out_judge 전용
   safety.py                    # 공통
   run_store.py                  # 공통
   schemas.py                     # 스키마 정의
