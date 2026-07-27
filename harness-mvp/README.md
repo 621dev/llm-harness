@@ -30,7 +30,7 @@ Phase 3 검증: mock 아님 — 실제 claude/codex CLI(구독) + Gemini REST AP
 cd harness-mvp
 pip install -e .[dev]                                     # pydantic + pytest 설치
 
-python -m pytest tests/ -v                                # 294개, 전부 mock — 실제 CLI/API 미호출
+python -m pytest tests/ -v                                # 301개, 전부 mock — 실제 CLI/API 미호출
 
 PYTHONPATH=src python -m harness.cli run --task examples/task.fan_out.json
 PYTHONPATH=src python -m harness.cli run --task examples/task.fan_out.json --models claude,gemini  # 이 실행만 후보 모델 오버라이드(codex 제외)
@@ -160,8 +160,14 @@ tests/` 밖에 둔다. **Gemini free tier 일 20회 한도로 아직 유효 데�
 
 `scripts/new_domain.py` — 도메인 폴더 스캐폴딩 자동화(2026-07-16, ncp-snapshot-drill/
 centos-eol-migration 반복 절차 스크립트화). Fetcher/커스텀 실행 스크립트 없이
-`config.json`+`examples/task.*.json`만 쓰는 "가벼운" hierarchical_delegation
-도메인 전용(cloud-ops류 Fetcher/xlsx 도메인은 대상 아님). LLM/CLI 미호출 순수
+`config.json`+`examples/task.*.json`만 쓰는 "가벼운" 도메인 전용(cloud-ops류
+Fetcher/xlsx 도메인은 대상 아님). **`--pattern`으로 팀 패턴 4종 모두 지원**
+(2026-07-27) — `iterative_refinement`/`agentic_task`는 키워드 자동 라우팅이 없어
+task json의 `constraints`에 `"team_pattern:<이름>"`을 자동으로 넣고(없으면
+fan_out_judge로 폴백돼 못 쓰는 도메인이 만들어짐), 그 패턴의 비용 상한
+knob(`max_refinement_rounds`/`max_agent_turns`)과 "이 패턴에서 실제로 쓰이는
+필드가 뭔지" 설명을 config에 함께 넣는다. agentic_task는 승인 게이트 안내도
+출력. LLM/CLI 미호출 순수
 로컬 로직 — `tests/test_new_domain_script.py`로 pytest 커버.
 `PYTHONPATH=src python scripts/new_domain.py <이름> --task-id <id> --prompt "..."`
 실행 시 config.json/task json 생성 + `planner.create_plan()`으로 기대
@@ -204,7 +210,7 @@ dashboard/failure_analysis/live_status → cli). CI 없는 프로젝트라 "린�
 검증**: `schemas.py`에 `from . import orchestrator`(역방향) 임시 추가 →
 테스트가 정확히 잡아내는 것 확인 후 원복.
 
-## 테스트 (294개, 전부 통과)
+## 테스트 (301개, 전부 통과)
 
 새 테스트 파일 추가/파일별 개수 변경 시 이 표도 같이 갱신(2026-07-24 문서
 감사에서 실제(239개)와 다른 옛 숫자(141개)로 오래 방치된 것 발견 —
@@ -232,7 +238,7 @@ dashboard/failure_analysis/live_status → cli). CI 없는 프로젝트라 "린�
 | `test_phase6_dashboard.py` | 13 | run 상태 판정 6종, plan.json 없을 때 direct_call 귀속, 평균 latency/cost, 패턴별 분리·정렬, HTML 렌더링 2종 |
 | `test_fetchers.py` | 26 | AWS EC2(컴퓨트/EBS/Windows 라이선스 BYOL 구분, 캐시, 미지원 instance_type/네트워크 실패), AWS EFS(One Zone/Standard), NCP 서버(서명 알고리즘/대상 회귀, 캐시, Windows 라이선스 매칭/폴백/Bare Metal 제외, 시간당만 추출·정렬, 월정액 제외), NCP 스토리지(블록/NAS) |
 | `test_live_status.py` | 47 | pid 생존 판정(OS 무관), `describe_run()` 상태 판정 전종(errors.json 단독 존재 시 done_error 회귀 포함), 여러 workspace 합산, direct_output 판정, `render_html()`/`render_guide_html()`(필터, 접기, 가이드 분리·양방향 링크) |
-| `test_new_domain_script.py` | 7 | config.json/task json 생성, 기존 도메인 재생성 에러, 라우팅 키워드 유무별 분류·경고, provider 레지스트리 구성 |
+| `test_new_domain_script.py` | 14 | config.json/task json 생성, 기존 도메인 재생성 에러, 라우팅 키워드 유무별 분류·경고, provider 레지스트리 구성, **패턴 4종 스캐폴딩**(opt-in 패턴은 `constraints` 자동 주입 — 빠지면 fan_out_judge로 폴백돼 못 쓰는 도메인이 생김, 키워드 라우팅 패턴엔 반대로 넣지 않음, 패턴별 비용 knob/설명, 승인 게이트 안내, 지원 목록 전체 회귀) |
 | `test_setup_worktree_script.py` | 3 | 새 worktree sparse-checkout 적용, 메인 체크아웃 실행 시 거부, domains/ 없을 때 거부(git 호출 전 차단) |
 | `test_architecture_layers.py` | 6 | `harness/*.py` 상대 import 추출(순수 함수), 전체 모듈의 허용 계층 준수 여부(`agent_runner` 포함) |
 

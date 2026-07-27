@@ -73,6 +73,95 @@ class CreateDomainTest(unittest.TestCase):
             )
 
 
+class OptInPatternScaffoldTest(unittest.TestCase):
+    """iterative_refinement/agentic_task는 키워드 자동 라우팅이 없어서, 스크립트가
+    task json에 `team_pattern:` 제약을 직접 넣어주지 않으면 프롬프트와 무관하게
+    fan_out_judge로 폴백된다 — 스캐폴딩이 곧바로 못 쓰는 도메인을 만드는 셈이라
+    이 동작을 고정해둔다."""
+
+    def setUp(self) -> None:
+        self.tmp_dir = Path(tempfile.mkdtemp(prefix="new-domain-test-"))
+        self.addCleanup(lambda: shutil.rmtree(self.tmp_dir, ignore_errors=True))
+
+    def scaffold(self, pattern: str, *, prompt: str = "가상의 주제로 자료를 작성해줘.") -> Path:
+        return new_domain.create_domain(
+            f"test-{pattern}",
+            task_id="test-task",
+            prompt=prompt,
+            pattern=pattern,
+            domains_root=self.tmp_dir,
+        )
+
+    def test_iterative_refinement_task_gets_optin_constraint_and_routes(self) -> None:
+        domain_dir = self.scaffold("iterative_refinement")
+
+        task = json.loads((domain_dir / "examples" / "task.test-task.json").read_text(encoding="utf-8"))
+        self.assertEqual(task["constraints"], ["team_pattern:iterative_refinement"])
+
+        result = new_domain.verify_domain(
+            domain_dir, task_id="test-task", expected_pattern="iterative_refinement"
+        )
+        self.assertTrue(result["pattern_matches_expected"])
+        self.assertEqual(result["delegation_chain"], [])
+
+    def test_agentic_task_gets_optin_constraint_and_routes(self) -> None:
+        domain_dir = self.scaffold("agentic_task")
+
+        task = json.loads((domain_dir / "examples" / "task.test-task.json").read_text(encoding="utf-8"))
+        self.assertEqual(task["constraints"], ["team_pattern:agentic_task"])
+
+        result = new_domain.verify_domain(
+            domain_dir, task_id="test-task", expected_pattern="agentic_task"
+        )
+        self.assertTrue(result["pattern_matches_expected"])
+
+    def test_keyword_routed_patterns_get_no_constraint(self) -> None:
+        """자동 라우팅되는 패턴에까지 제약을 박아두면 프롬프트를 고쳐도 분류가
+        안 바뀌어서, router 검증이라는 이 스크립트의 목적이 무력해진다."""
+        for pattern in ("hierarchical_delegation", "fan_out_judge"):
+            with self.subTest(pattern=pattern):
+                domain_dir = self.scaffold(pattern, prompt="XX를 조사해줘.")
+                task = json.loads(
+                    (domain_dir / "examples" / "task.test-task.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(task["constraints"], [])
+
+    def test_config_explains_fields_that_matter_for_the_pattern(self) -> None:
+        domain_dir = self.scaffold("iterative_refinement")
+
+        config = json.loads((domain_dir / "config.json").read_text(encoding="utf-8"))
+        self.assertIn("generator", config["_설명"]["_주의"])
+        self.assertEqual(config["max_refinement_rounds"], 3)  # 이 패턴의 비용 상한 knob
+
+    def test_agentic_config_carries_turn_limit_knob(self) -> None:
+        domain_dir = self.scaffold("agentic_task")
+
+        config = json.loads((domain_dir / "config.json").read_text(encoding="utf-8"))
+        self.assertEqual(config["max_agent_turns"], 8)
+        self.assertNotIn("max_refinement_rounds", config)  # 안 쓰는 knob은 넣지 않는다
+
+    def test_agentic_notice_warns_about_approval_gate(self) -> None:
+        notice = "\n".join(new_domain.render_pattern_notice("agentic_task"))
+
+        self.assertIn("승인", notice)
+        self.assertEqual(new_domain.render_pattern_notice("hierarchical_delegation"), [])
+
+    def test_all_supported_patterns_scaffold_and_route(self) -> None:
+        """지원 목록에 패턴을 추가하고 배선을 빠뜨리는 걸 막는 회귀 테스트."""
+        for pattern in new_domain.SUPPORTED_PATTERNS:
+            with self.subTest(pattern=pattern):
+                prompt = "XX를 조사해줘." if pattern == "hierarchical_delegation" else "자료를 작성해줘."
+                domain_dir = new_domain.create_domain(
+                    f"all-{pattern}",
+                    task_id="t",
+                    prompt=prompt,
+                    pattern=pattern,
+                    domains_root=self.tmp_dir,
+                )
+                result = new_domain.verify_domain(domain_dir, task_id="t", expected_pattern=pattern)
+                self.assertTrue(result["pattern_matches_expected"], pattern)
+
+
 class VerifyDomainTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp_dir = Path(tempfile.mkdtemp(prefix="new-domain-test-"))
