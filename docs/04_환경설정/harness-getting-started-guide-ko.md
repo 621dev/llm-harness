@@ -137,11 +137,92 @@ python -m harness.cli status --all-domains --output _workspace/overview.html
 run을 표로 볼 수 있다(도메인/team_pattern/상태 필터 포함). 자세한 설명은
 생성된 페이지 안의 "이 표를 보는 법" 링크를 참고.
 
+## 7. 한 걸음 더 — 나머지 두 패턴
+
+여기까지는 프롬프트의 키워드를 보고 자동으로 골라지는 두 패턴
+(`hierarchical_delegation`, `fan_out_judge`)만 썼다. 패턴은 두 개가 더 있는데,
+**자동으로는 절대 안 걸리고 task 파일에 명시해야만 쓰인다**. 비용이 크거나
+(반복 호출) 실제 파일을 만드는 부수 효과가 있어서, 모르고 걸리는 일이 없도록
+일부러 그렇게 해뒀다.
+
+### `iterative_refinement` — 통과할 때까지 고쳐 쓰기
+
+한 번 생성하고 끝내는 대신, **평가자가 기준(rubric) 충족 여부를 판정하고
+불통과면 피드백을 반영해 다시 쓰는** 걸 반복한다. 치트시트·요약표처럼 "형식을
+갖춘 완성물"이 필요할 때 쓴다.
+
+task 파일에 `constraints`만 넣으면 된다:
+
+```json
+{
+  "task_id": "cheatsheet",
+  "prompt": "리눅스 필수 명령어 치트시트를 표로 작성해줘.",
+  "constraints": ["team_pattern:iterative_refinement"]
+}
+```
+
+저장소에 예제가 이미 있으니 바로 돌려볼 수 있다:
+
+```bash
+python -m harness.cli run --task examples/task.iterative_refinement.json --models gemini
+```
+
+- 라운드마다 생성자 1회 + 평가자 1회를 부르므로 **비용이 라운드 수만큼 는다.**
+  상한은 `config.json`의 `max_refinement_rounds`(기본 3).
+- 구독 CLI(claude/codex)를 생성자로 쓰면 라운드마다 구독 한도를 깎으니
+  위처럼 `--models gemini`(종량제)를 권한다.
+- 품질이 이미 기준을 넘으면 1라운드에 끝난다 — 그때 추가 비용은 평가자 1회뿐이라
+  일종의 보험으로 생각하면 된다.
+- 라운드별 기록은 run 폴더의 `refinement.json`에 남는다.
+
+### `agentic_task` — 에이전트가 실제 파일을 만든다
+
+앞의 셋과 성격이 다르다. 지금까지는 하네스가 "다음에 뭘 할지"를 정했지만,
+여기서는 **에이전트(claude CLI)가 스스로 도구를 호출하며 진행하고** 하네스는
+울타리와 기록을 맡는다. 결과물이 텍스트가 아니라 **실제 마크다운 파일 여러 개**
+같은 형태여야 할 때 쓴다.
+
+```json
+{
+  "task_id": "build-guide",
+  "prompt": "리눅스 학습 자료를 주제별 마크다운 파일 3개로 작성해줘.",
+  "constraints": ["team_pattern:agentic_task"]
+}
+```
+
+이것도 예제(`examples/task.agentic.json`, task_id는 `agentic-demo`)로 바로
+확인할 수 있다:
+
+```bash
+python -m harness.cli run --task examples/task.agentic.json
+# → "사람 승인 대기 중"에서 멈춘다. 확인 후:
+python -m harness.cli approve run-agentic-demo
+```
+
+**처음 쓰면 당황할 수 있는 두 가지**를 미리 알아둘 것:
+
+1. **run이 한 번에 안 끝난다.** 되돌리기 어려운 작업이라 항상 사람 승인을 거치게
+   돼 있다(`risk_level=high` 강제). 위처럼 `run` → 확인 → `approve` 2단계다.
+2. **파일은 run 폴더 안에만 생긴다** —
+   `_workspace/runs/<run_id>/artifacts/agent_workspace/`. 에이전트는 그 폴더
+   밖의 파일을 읽지도 쓰지도 못하고, 명령 실행(Bash)·네트워크 도구도 막혀 있다.
+   내 프로젝트가 망가질 걱정은 안 해도 된다.
+
+에이전트가 턴마다 무슨 도구를 썼는지는 `agent_turns.json`에, 울타리가 막아낸
+시도가 있으면 그것도 함께 기록된다. 상한은 `config.json`의 `max_agent_turns`
+(기본 8). claude 구독 로그인이 필요하다(Gemini 키로는 이 패턴을 못 쓴다).
+
+> 두 패턴 모두 `new_domain.py`로 도메인을 만들 때
+> `--pattern iterative_refinement` / `--pattern agentic_task`를 주면
+> `constraints`와 관련 설정을 알아서 넣어준다.
+
 ## 다음에 볼 것
 
 - **전체 스펙이 궁금하면**: `docs/02_구현플랜/harness-implementation-plan-ko.md`
   (비개발자용 요약은 `harness-implementation-plan-summary-beginner-ko.md`)
-- **코드 구조가 궁금하면**: `harness-mvp/README.md`
+- **코드 구조가 궁금하면**: `harness-mvp/README.md`(패턴 4종 비교표 포함).
+  7절 두 패턴의 설계 배경과 알려진 한계는 `harness-mvp/docs/adr/`의
+  `0006-iterative-refinement-pattern.md` / `0007-agentic-task-pattern.md`
 - **cloud-ops처럼 Fetcher(실측 가격 조회)까지 쓰는 "무거운" 도메인을 만들고
   싶다면**: `harness-mvp/docs/adr/0005-domain-folder-architecture.md`의 설계
   결정을 참고해서 `harness-mvp/src/fetchers/`의 기존 Fetcher를 재사용하는
