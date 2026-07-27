@@ -103,7 +103,9 @@ pip install -e .[dev]
 python -m pytest tests/ -v
 ```
 
-149개(2026-07-14 기준, 스토리지 Fetcher 포함) 전부 통과해야 정상.
+전부 통과해야 정상(2026-07-27 기준 294개 — 기능이 늘면 개수도 늘어나니 "전부
+통과"가 기준이고 숫자 자체는 참고값이다. 정확한 최신 개수는
+`harness-mvp/README.md`의 테스트 표 참고).
 
 ## 7. API 키 설정 — `harness-mvp/.env`
 

@@ -1,4 +1,4 @@
-# harness-mvp — Phase 1~6 완료 + ADR 0005 (도메인 폴더 아키텍처)
+# harness-mvp — Phase 1~6 완료 + 팀 패턴 4종 (ADR 0001~0007)
 
 전체 설계: `../docs/02_구현플랜/harness-implementation-plan-ko.md`.
 
@@ -8,10 +8,21 @@ Phase 3 검증: mock 아님 — 실제 claude/codex CLI(구독) + Gemini REST AP
 — 아래 "빠르게 써보기"의 `run` 명령 그대로 실행 시 실제 LLM 호출(자격증명
 필요, 바로 아래).
 
-로드맵 완료 후 ADR 0005(공유 엔진 + 독립 도메인 폴더) 추가 — 클라우드 운영/
-장르 소설/일일 비서 등 역할별 확장 검토 결과. 1차 검증 도메인:
-`../domains/cloud-ops/`. 세부: 아래 "구성 요소"의 `src/fetchers/`·
-`domains/cloud-ops/` 항목, 맨 아래 "ADR 0005" 절.
+로드맵 완료 후 추가된 것: ADR 0005(공유 엔진 + 독립 도메인 폴더 — 1차 검증
+도메인 `../domains/cloud-ops/`), ADR 0006/0007(세 번째·네 번째 팀 패턴).
+
+**팀 패턴 4종** — `team_pattern` 값으로 분기하며, 뒤 두 개는 `constraints`의
+`"team_pattern:<이름>"` opt-in으로만 진입한다:
+
+| 패턴 | 목적 | 루프 제어 |
+| --- | --- | --- |
+| `fan_out_judge` | 여러 모델 독립 후보 → Judge 비교 → 합성(품질 비교) | 하네스(1패스) |
+| `hierarchical_delegation` | 역할별 모델에 순차 위임(역할 분업/비용 절약) | 하네스(정해진 체인) |
+| `iterative_refinement` | 생성 → rubric 합격 판정 → 피드백 반영 재생성 반복 | 하네스(`for` 루프) |
+| `agentic_task` | 자율 에이전트가 도구를 호출해 실제 파일 생성 | **모델**(+사람 승인 필수) |
+
+앞의 셋은 전부 `Provider.generate(prompt) -> Candidate` 단발 호출의 조합이고,
+`agentic_task`만 모델의 출력이 다음 단계를 결정한다(ADR 0007).
 
 ## 빠르게 써보기
 
@@ -114,17 +125,18 @@ pass_at_k/pass_pow_k 정의, 실패 시도를 cost/latency 평균에서 제외) 
 
 ## 아직 안 한 것
 
-로드맵(Phase 1~6) + `cli.py` 실제 provider 배선 + ADR 0004(Judge 재설계 +
-fault-injection 검증) + 구독 한도 보호 + Safety/Approval 실제 provider e2e
-재검증 + 운영 설정 파일(`config.json`) + ADR 0005(도메인 폴더 아키텍처 +
-Fetcher + `domains/cloud-ops` 검증) + Codex CLI stdin 전달 수정 — 전부
-완료(2026-07-13). 남은 후보(미착수):
+로드맵(Phase 1~6) + `cli.py` 실제 provider 배선 + ADR 0004~0007 + 도메인 폴더
+아키텍처/Fetcher + 대시보드(회고 집계 + 라이브 상태) + 워크트리 관리 자동화 +
+아키텍처 불변량 테스트 + 팀 패턴 4종 — 전부 완료(2026-07-27). 남은 후보(미착수):
 
-1. 대시보드 라이브 진행상황 뷰(사용자 요청, 방향만 기록 — `dashboard.py`는
-   완전히 회고적, "현재 실행 중" 표시 안 됨, 진행 상태 기록/갱신 장치 필요).
+1. **패턴 부가가치 측정 재개** — 체인이 단일 호출보다 품질이 나은지 아직
+   데이터가 없다. `scripts/measure_pattern_value.py`는 작성/부분 검증까지
+   했으나 Gemini free tier 일 20회 한도로 미완(아래 스크립트 절 참고).
 2. `domains/cloud-ops`를 `--claude-only` 임시 조치 없이 원래 취지(모델 비교)로
    재검증 — 이 환경엔 `GEMINI_API_KEY`/Codex CLI 모두 준비됨(NCP 키는 없어
    그쪽만 추정 폴백).
+3. `agentic_task`에 Bash 허용 여부 — 프로세스 수준 격리(컨테이너 등)를 먼저
+   갖춘 뒤 별도 결정(ADR 0007 "알려진 한계").
 
 추가 요청 시 우선순위 결정.
 
@@ -134,6 +146,17 @@ Fetcher + `domains/cloud-ops` 검증) + Codex CLI stdin 전달 수정 — 전부
 양방향 케이스로 확인 — `GEMINI_API_KEY` 필요,
 `PYTHONPATH=src python scripts/verify_judge_fault_injection.py` 실행.
 2026-07-10 결과: 2회 연속 전부 PASS(2단계 Self-Consistency 격상 근거 없음).
+
+`scripts/measure_pattern_value.py` — **패턴 부가가치 측정(2026-07-27, 미완).**
+"체인(hierarchical_delegation)의 검토 스텝이 단일 호출보다 실제로 품질을
+올리는가"를 한 번도 측정한 적 없다는 갭을 메우려고 만들었다. 같은 프롬프트를
+direct_call vs 체인으로 k회씩 실행하고, 두 조건 산출물에 동일한
+`judge.check_pass()`를 blind로 적용해 합격률/비용/지연을 비교한다. 모델을 전
+조건 gemini로 고정해 "구조 효과"만 분리(역할별 모델 특화는 별도 변수라 통제).
+실제 API 호출이라 `verify_judge_fault_injection.py`와 같은 이유로 `pytest
+tests/` 밖에 둔다. **Gemini free tier 일 20회 한도로 아직 유효 데이터를 못
+얻었다** — 한도 리셋 후 `PYTHONPATH=src python scripts/measure_pattern_value.py
+--k 3` 재실행하면 된다(스크립트/pacing 자체는 정상 동작 확인).
 
 `scripts/new_domain.py` — 도메인 폴더 스캐폴딩 자동화(2026-07-16, ncp-snapshot-drill/
 centos-eol-migration 반복 절차 스크립트화). Fetcher/커스텀 실행 스크립트 없이

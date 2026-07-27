@@ -74,3 +74,9 @@ gaebalai/claude-code-orchestrator, jikime/harness-lab) + 하네스 기본 개념
 
 실제 구현 코드: 이 문서 폴더가 아니라 프로젝트 루트 `../harness-mvp/`
 (`src/harness/`, `tests/`, `pyproject.toml`, `README.md`).
+
+**구조 결정 기록(ADR)은 코드 옆에 있다** — `../harness-mvp/docs/adr/`
+(`0001`~`0007`). "왜 이 구조인가"를 이 문서 폴더가 아니라 거기서 찾을 것:
+0001 팀 패턴 분기, 0002 Safety 릴리스 게이트, 0003 Debate/Consensus 도입 보류,
+0004 Judge를 실제 LLM 판단으로 승격, 0005 공유 엔진 + 독립 도메인 폴더,
+0006 `iterative_refinement`, 0007 `agentic_task`(자율 에이전트를 감싸는 하네스).
