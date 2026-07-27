@@ -22,7 +22,7 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
-TeamPattern = Literal["fan_out_judge", "hierarchical_delegation"]
+TeamPattern = Literal["fan_out_judge", "hierarchical_delegation", "iterative_refinement"]
 AuthMode = Literal["api_key", "cli_subscription"]
 RiskLevel = Literal["low", "medium", "high"]
 StepStatus = Literal["success", "error"]
@@ -36,7 +36,8 @@ class TaskInput(BaseModel):
 
     task_id: str
     prompt: str
-    # 현재 실제로 해석되는 건 "risk_level:<level>" 접두사(planner._infer_risk_level)뿐이다.
+    # 현재 실제로 해석되는 건 "risk_level:<level>"(planner._infer_risk_level)과
+    # "team_pattern:<pattern>"(planner._team_pattern_override) 접두사뿐이다.
     # 그 외 문자열은 input.json에 기록만 되고 plan/실행에는 반영되지 않는다 — 규칙 기반
     # mock 단계라 무해하지만, 진짜 LLM 프롬프트에 자동 반영될 거라 오해하지 않도록 명시.
     constraints: list[str] = Field(default_factory=list)
@@ -107,6 +108,34 @@ class Judging(BaseModel):
     scores: list[JudgingScore]
     recommended_strategy: str
     winner: str
+    latency_ms: Optional[int] = None
+    cost_usd: Optional[float] = None
+
+
+class RefinementVerdict(BaseModel):
+    """judge.check_pass()의 산출물 (iterative_refinement 전용).
+
+    Judging(N개 후보 비교)과 다른 질문 — "이 콘텐츠 하나가 rubric을 통과하는가"에
+    대한 pass/fail + 다음 라운드에 전달할 구체적 피드백이다. latency_ms/cost_usd는
+    evaluator 호출 자체의 지연/비용 (Cost Blindness 방지, Judging과 동일한 이유).
+    """
+
+    passed: bool
+    feedback: str
+    latency_ms: Optional[int] = None
+    cost_usd: Optional[float] = None
+
+
+class RefinementRound(BaseModel):
+    """iterative_refinement 패턴의 라운드 하나. refinement.json에 목록으로 저장된다.
+
+    latency_ms/cost_usd는 해당 라운드의 generator+evaluator 호출 합산이다.
+    """
+
+    round_index: int
+    content: str
+    passed: bool
+    feedback: str
     latency_ms: Optional[int] = None
     cost_usd: Optional[float] = None
 

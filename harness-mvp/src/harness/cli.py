@@ -129,6 +129,7 @@ def _providers_from_args(args: argparse.Namespace) -> dict[str, Provider]:
     Section 9)."""
     config = load_config()
     orchestrator.MAX_SUBSCRIPTION_CANDIDATES = config.max_subscription_candidates
+    orchestrator.MAX_REFINEMENT_ROUNDS = config.max_refinement_rounds
     models = _parse_models(args.models, config.candidate_models)
     return _default_providers(models, config)
 
@@ -359,11 +360,23 @@ def _current_branch(path: Path) -> str:
     return _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=path).stdout.strip()
 
 
+def _current_commit(path: Path) -> str:
+    return _git(["rev-parse", "HEAD"], cwd=path).stdout.strip()
+
+
 def sync_worktree_with_main(path: Path) -> dict[str, str]:
     """이 worktree(path)에 origin/main을 merge한다. 브랜치가 main 자신이면(메인
     체크아웃) merge commit을 만들 필요가 없으니 --ff-only로 안전하게 pull만 한다
-    — fast-forward가 안 된다면 그 자체가 로컬에 main 전용 커밋이 있다는 이상 신호."""
+    — fast-forward가 안 된다면 그 자체가 로컬에 main 전용 커밋이 있다는 이상 신호.
+
+    up_to_date/merged 판정은 git stdout 문구("Already up to date" 등) 매칭이 아니라
+    merge 전후 HEAD 커밋 SHA를 직접 비교해서 한다 — 문구 매칭은 로케일/git 버전에
+    따라 실제 출력이 달라질 수 있다(2026-07-27 실측: PR #44 merge 직후 이 worktree들에
+    실제로 fast-forward/merge 커밋이 생겼는데도 stdout에 "Already up to date"가
+    섞여 있어 up_to_date로 잘못 라벨링되는 걸 발견 — SHA 비교는 이 문제 자체가
+    성립하지 않음)."""
     branch = _current_branch(path)
+    before_commit = _current_commit(path)
     if branch == "main":
         result = _git(["merge", "--ff-only", "origin/main"], cwd=path)
     else:
@@ -372,10 +385,9 @@ def sync_worktree_with_main(path: Path) -> dict[str, str]:
     output = (result.stdout + result.stderr).strip()
     if result.returncode != 0:
         status = "conflict" if "CONFLICT" in result.stdout else "error"
-    elif "Already up to date" in result.stdout:
-        status = "up_to_date"
     else:
-        status = "merged"
+        after_commit = _current_commit(path)
+        status = "up_to_date" if after_commit == before_commit else "merged"
     return {"path": str(path), "branch": branch, "status": status, "output": output}
 
 

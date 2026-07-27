@@ -5,11 +5,13 @@
     "judge_model": "fan_out_judge 판단(judge)에 쓸 모델 1개. ADR 0004: 후보 생성 모델과 분리해두는 게 self-preference bias 방지에 안전함. --models로는 못 바꿈(여기서만 수정)",
     "delegation_model": "hierarchical_delegation에서 delegation_role_models에 명시 안 된 역할에 쓸 기본 모델(역할 분담을 안 쓰면 사실상 전체 역할에 쓰임)",
     "delegation_role_models": "hierarchical_delegation의 역할(research/design_review/implementation_review)별로 다른 모델을 쓰고 싶을 때만 채운다. 예: {\"research\": \"gemini\"} — research만 gemini, 나머지는 delegation_model. 빈 객체(기본값)면 전체 역할이 delegation_model 하나로 통일된다",
-    "max_subscription_candidates": "fan_out_judge 한 run에서 동시에 호출할 수 있는 구독(cli_subscription, 예: claude/codex CLI) provider 최대 개수. claude/codex는 5시간/주간 롤링 사용량 한도가 있어 이 값으로 한도 소모 속도를 제한한다(api_key 모드인 gemini는 종량제라 제한 없음)"
+    "max_subscription_candidates": "fan_out_judge 한 run에서 동시에 호출할 수 있는 구독(cli_subscription, 예: claude/codex CLI) provider 최대 개수. claude/codex는 5시간/주간 롤링 사용량 한도가 있어 이 값으로 한도 소모 속도를 제한한다(api_key 모드인 gemini는 종량제라 제한 없음)",
+    "max_refinement_rounds": "iterative_refinement의 라운드 상한(ADR 0006). 라운드마다 generator+evaluator 2회 호출이 발생해 비용에 직결된다 — 최악의 경우 LLM 호출 수는 이 값 × 2 (+재시도)"
   },
   "candidate_models": ["claude", "codex", "gemini"],
   "judge_model": "gemini",
   "delegation_model": "claude",
   "delegation_role_models": {"research": "gemini", "design_review": "claude", "implementation_review": "codex"},
-  "max_subscription_candidates": 1
+  "max_subscription_candidates": 1,
+  "max_refinement_rounds": 3
 }

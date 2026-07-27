@@ -135,6 +135,21 @@ class LoadConfigTest(unittest.TestCase):
         self.assertEqual(config.judge_model, "gemini")  # 파일에 없는 필드는 기본값
         self.assertEqual(config.delegation_role_models, {})  # 파일에 없는 필드는 기본값(빈 dict)
 
+    def test_reads_max_refinement_rounds_from_file(self) -> None:
+        config_path = self.tmp_dir / "config.json"
+        config_path.write_text(json.dumps({"max_refinement_rounds": 5}), encoding="utf-8")
+
+        config = load_config(config_path)
+
+        self.assertEqual(config.max_refinement_rounds, 5)
+
+    def test_max_refinement_rounds_defaults_to_orchestrator_constant(self) -> None:
+        """config.json에 값이 없으면 orchestrator의 하드코딩 기본값(도입 당시
+        MAX_REFINEMENT_ROUNDS=3)과 같아야 한다 — 파일 없이도 기존 동작 유지."""
+        config = load_config(self.tmp_dir / "does-not-exist.json")
+
+        self.assertEqual(config.max_refinement_rounds, 3)
+
     def test_reads_delegation_role_models_from_file(self) -> None:
         config_path = self.tmp_dir / "config.json"
         config_path.write_text(
@@ -233,32 +248,37 @@ class SyncWorktreeWithMainTest(unittest.TestCase):
     def test_domain_branch_merges_origin_main(self, mock_git: MagicMock) -> None:
         mock_git.side_effect = [
             subprocess.CompletedProcess(args=[], returncode=0, stdout="claude/cloud-ops-034a88\n", stderr=""),
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="abc123\n", stderr=""),  # before HEAD
             subprocess.CompletedProcess(args=[], returncode=0, stdout="Updating abc..def\nFast-forward\n", stderr=""),
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="def456\n", stderr=""),  # after HEAD
         ]
 
         result = cli.sync_worktree_with_main(Path("/repo/worktree"))
 
         self.assertEqual(result["status"], "merged")
-        merge_call_args = mock_git.call_args_list[1].args[0]
+        merge_call_args = mock_git.call_args_list[2].args[0]
         self.assertEqual(merge_call_args, ["merge", "origin/main", "--no-edit"])
 
     @patch("harness.cli._git")
     def test_main_branch_uses_fast_forward_only_pull(self, mock_git: MagicMock) -> None:
         mock_git.side_effect = [
             subprocess.CompletedProcess(args=[], returncode=0, stdout="main\n", stderr=""),
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="abc123\n", stderr=""),  # before HEAD
             subprocess.CompletedProcess(args=[], returncode=0, stdout="Already up to date.\n", stderr=""),
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="abc123\n", stderr=""),  # after HEAD (동일)
         ]
 
         result = cli.sync_worktree_with_main(Path("/repo"))
 
         self.assertEqual(result["status"], "up_to_date")
-        merge_call_args = mock_git.call_args_list[1].args[0]
+        merge_call_args = mock_git.call_args_list[2].args[0]
         self.assertEqual(merge_call_args, ["merge", "--ff-only", "origin/main"])
 
     @patch("harness.cli._git")
     def test_conflict_is_reported_not_raised(self, mock_git: MagicMock) -> None:
         mock_git.side_effect = [
             subprocess.CompletedProcess(args=[], returncode=0, stdout="claude/ncp-6191ba\n", stderr=""),
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="abc123\n", stderr=""),  # before HEAD
             subprocess.CompletedProcess(
                 args=[], returncode=1, stdout="CONFLICT (content): Merge conflict in x.md\n", stderr=""
             ),
@@ -267,6 +287,24 @@ class SyncWorktreeWithMainTest(unittest.TestCase):
         result = cli.sync_worktree_with_main(Path("/repo/worktree"))
 
         self.assertEqual(result["status"], "conflict")
+
+    @patch("harness.cli._git")
+    def test_status_derived_from_head_sha_not_stdout_wording(self, mock_git: MagicMock) -> None:
+        # 회귀 방지(2026-07-27 실제로 겪음): PR #44 merge 직후 실제 환경에서 fast-forward/
+        # merge가 실제로 일어났는데도 git stdout에 "Already up to date" 문구가 섞여
+        # up_to_date로 잘못 라벨링됐다. HEAD 커밋이 실제로 바뀌었으면 stdout 문구와
+        # 무관하게 "merged"여야 한다.
+        mock_git.side_effect = [
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="main\n", stderr=""),
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="abc123\n", stderr=""),  # before HEAD
+            # 오해를 부르는 문구지만 실제로는 HEAD가 바뀌는 상황을 시뮬레이션
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="Already up to date.\n", stderr=""),
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="def456\n", stderr=""),  # after HEAD (다름)
+        ]
+
+        result = cli.sync_worktree_with_main(Path("/repo"))
+
+        self.assertEqual(result["status"], "merged")
 
 
 class FindStaleWorktreeBranchesTest(unittest.TestCase):

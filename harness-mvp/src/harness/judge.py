@@ -1,4 +1,4 @@
-"""Judge: 후보 비교 평가 (Fan-out/Judge 패턴 전용, ADR 0004).
+"""Judge: LLM 기반 평가 (fan_out_judge의 후보 비교 + iterative_refinement의 합격 판정).
 
 harness-implementation-plan-ko.md Section 6, Section 7 Step 6과
 `docs/adr/0004-judge-real-llm-upgrade.md`를 구현한다.
@@ -30,7 +30,7 @@ import string
 from providers.base import Provider
 
 from . import model_runner
-from .schemas import Judging, JudgingScore, Candidate
+from .schemas import Judging, JudgingScore, Candidate, RefinementVerdict
 
 _MERGE_THRESHOLD = 0.1  # 1·2등 점수 차이가 이 값(0~1 스케일) 미만이면 병합 전략 추천
 
@@ -77,6 +77,69 @@ def evaluate(candidates: list[Candidate], rubric: list[str], judge_provider: Pro
         latency_ms=judge_candidate.latency_ms,
         cost_usd=judge_candidate.cost_usd,
     )
+
+
+def check_pass(content: str, rubric: list[str], judge_provider: Provider) -> RefinementVerdict:
+    """콘텐츠 하나가 rubric을 통과하는지 판정한다 (iterative_refinement 전용).
+
+    evaluate()(N개 후보 비교)와 다른 질문이라 별도 함수다. reject-first 원칙은
+    동일하게 적용한다(ADR 0004) — 결함부터 찾고, 그 결함이 rubric을 못 채울
+    정도인지 판단하게 한다. feedback은 fail일 때 다음 라운드 generator 프롬프트에
+    그대로 들어가므로 "무엇을 어떻게 고쳐야 하는지"를 요구한다.
+    """
+    prompt = _build_pass_prompt(content, rubric)
+
+    judge_candidate = model_runner.generate_with_retry(judge_provider, prompt, temperature=0.0)
+    if judge_candidate.status == "error":
+        raise JudgeError(f"evaluator 호출 실패: {judge_candidate.content}")
+
+    parsed = _parse_pass_response(judge_candidate.content)
+
+    return RefinementVerdict(
+        passed=parsed["passed"],
+        feedback=parsed["feedback"],
+        latency_ms=judge_candidate.latency_ms,
+        cost_usd=judge_candidate.cost_usd,
+    )
+
+
+def _build_pass_prompt(content: str, rubric: list[str]) -> str:
+    rubric_lines = "\n".join(f"- {item}" for item in rubric) or "- (rubric 없음, 일반적인 품질 기준으로 판단)"
+    return (
+        "당신은 LLM이 만든 답변이 기준을 충족하는지 판정하는 심사자다.\n\n"
+        "## 평가 기준 (rubric)\n"
+        f"{rubric_lines}\n\n"
+        "## 지시사항\n"
+        '- 답변의 결함/약점을 근거와 함께 먼저 찾아라. "문제 없음"을 기본값으로 삼지 마라.\n'
+        "- 찾은 결함이 rubric을 충족하지 못할 정도인지 판단하라 — 사소한 결함만 있으면 통과다.\n"
+        "- 통과가 아니라면 feedback에 무엇을 어떻게 고쳐야 하는지 구체적으로 써라"
+        " (이 피드백만 보고 답변을 다시 쓸 수 있어야 한다).\n"
+        "- 답변 길이로 판단하지 마라 — 길다고 더 나은 답은 아니다.\n"
+        "- 아래 JSON 형식으로만 답하라. 다른 텍스트/설명을 앞뒤에 붙이지 마라.\n\n"
+        "## 답변\n"
+        f"{content}\n\n"
+        "## 출력 형식 (JSON)\n"
+        '{"passed": <true/false>, "feedback": "<불통과 사유와 수정 지시. 통과면 빈 문자열>"}\n'
+    )
+
+
+def _parse_pass_response(content: str) -> dict:
+    match = re.search(r"\{.*\}", content, re.DOTALL)
+    if not match:
+        raise JudgeError(f"evaluator 응답에서 JSON을 찾지 못함: {content[:200]!r}")
+
+    try:
+        parsed = json.loads(match.group(0))
+    except json.JSONDecodeError as exc:
+        raise JudgeError(f"evaluator 응답 JSON 파싱 실패: {content[:200]!r}") from exc
+
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("passed"), bool):
+        raise JudgeError(f"evaluator 응답에 'passed'(bool)가 없음: {content[:200]!r}")
+
+    feedback = parsed.get("feedback", "")
+    if not isinstance(feedback, str):
+        feedback = str(feedback)
+    return {"passed": parsed["passed"], "feedback": feedback}
 
 
 def _assign_labels(successful: list[Candidate]) -> dict[str, Candidate]:

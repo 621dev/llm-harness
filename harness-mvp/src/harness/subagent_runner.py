@@ -14,6 +14,18 @@ Observation(summary + output_ref)만 반환한다 — 이게 gaebalai/claude-cod
 재시도까지 실패하면 체인을 중단하고, 아직 실행하지 않은 나머지 단계는 건드리지 않는다
 (Section 6: "체인 중단 시 마지막으로 성공한 스텝 결과를 partial로 승격, ask_user" —
 실제 partial 승격/ask_user 연결은 Step 8 orchestrator 완성 단계에서 다룬다).
+
+**역할별 지시문 스코핑** (2026-07-27, server-engineering-learning 도메인 실제 e2e
+검증 중 발견): 원래 각 스텝에 그대로 넘어가던 입력(첫 스텝은 `task.prompt` 원문, 이후
+스텝은 이전 스텝 전체 출력)에는 "역할이 무엇인지" 정보가 전혀 없었다. 그래서 task
+프롬프트가 "리서치해줘 ... 그 다음 학습 자료 초안을 만들고 검토해줘"처럼 여러 역할의
+작업을 한 문장에 묶어서 쓰면, 첫 스텝(research)이 "너는 research만 해"라는 신호를
+못 받고 프롬프트 전체(초안 작성+검토까지)를 자기 혼자 다 하려고 시도했다 — 실제로
+codex CLI가 이 통짜 지시문을 통째로 처리하려다 120초 타임아웃을 반복해서 발견했다.
+`_apply_role_instruction()`이 스텝마다 "당신의 역할은 X, 나머지는 다음 담당자가
+한다"는 문장을 입력 앞에 덧붙여 스코핑한다. 역할 이름을 하드코딩하지 않고 스텝
+위치(첫 스텝 vs 이어받는 스텝)로만 템플릿을 고르므로, 어떤 역할 이름이 오든(planner의
+`_DEFAULT_DELEGATION_ROLES`에 없는 커스텀 역할이라도) 동일하게 적용된다.
 """
 from __future__ import annotations
 
@@ -26,6 +38,23 @@ from .model_runner import generate_with_retry
 from .schemas import Candidate, DelegationStep, Observation
 
 _SUMMARY_PREVIEW_CHARS = 120
+
+# 체인의 첫 스텝은 원본 task.prompt(사람이 쓴 통짜 요청)를 받고, 이후 스텝은 이전
+# 스텝의 전체 출력을 받는다 — 받는 내용의 성격이 다르므로 지시문도 둘로 나눈다.
+_FIRST_STEP_INSTRUCTION_TEMPLATE = (
+    "당신의 역할은 '{role}'입니다. 아래 요청 중 당신의 역할에 해당하는 작업만 "
+    "수행하세요 — 이후 단계는 다른 담당자가 이어받아 처리하니 여기서 전부 끝내려고 "
+    "하지 마세요.\n\n요청:\n{content}"
+)
+_CONTINUATION_INSTRUCTION_TEMPLATE = (
+    "당신의 역할은 '{role}'입니다. 아래는 이전 단계 결과물입니다. 당신의 역할에 "
+    "맞게 이어서 작업하세요.\n\n이전 단계 결과:\n{content}"
+)
+
+
+def _apply_role_instruction(role: str, content: str, *, is_first_step: bool) -> str:
+    template = _FIRST_STEP_INSTRUCTION_TEMPLATE if is_first_step else _CONTINUATION_INSTRUCTION_TEMPLATE
+    return template.format(role=role, content=content)
 
 
 def delegate(
@@ -44,7 +73,8 @@ def delegate(
     """
     step.input_ref = _preview(input_text)
 
-    candidate = generate_with_retry(provider, input_text)
+    provider_input = _apply_role_instruction(step.role, input_text, is_first_step=step_index == 1)
+    candidate = generate_with_retry(provider, provider_input)
     output_ref = f"artifacts/chain/step-{step_index}-{step.role}.md"
     run_store.write_markdown(run_dir, output_ref, _render_step_markdown(step, candidate))
     step.output_ref = output_ref

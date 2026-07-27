@@ -82,6 +82,29 @@ class PlannerTest(unittest.TestCase):
 
         self.assertEqual(plan.risk_level, "medium")
 
+    def test_team_pattern_override_to_iterative_refinement(self) -> None:
+        # router가 research -> hierarchical_delegation으로 분류할 프롬프트라도
+        # 명시적 override가 우선한다 (키워드 자동 라우팅 없음 — opt-in 전용).
+        task = make_task(
+            "t-8", "경쟁사 가격 정책을 리서치해줘", constraints=["team_pattern:iterative_refinement"]
+        )
+
+        plan = planner.create_plan(task)
+
+        self.assertEqual(plan.team_pattern, "iterative_refinement")
+        self.assertIsNone(plan.num_candidates)
+        self.assertEqual(plan.delegation_chain, [])
+        self.assertEqual(plan.task_type, "research")  # task_type/rubric은 router 분류를 유지
+
+    def test_team_pattern_override_with_unknown_value_is_ignored(self) -> None:
+        task = make_task(
+            "t-9", "경쟁사 가격 정책을 리서치해줘", constraints=["team_pattern:없는패턴"]
+        )
+
+        plan = planner.create_plan(task)
+
+        self.assertEqual(plan.team_pattern, "hierarchical_delegation")  # router 분류 그대로
+
 
 if __name__ == "__main__":
     unittest.main()

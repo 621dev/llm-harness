@@ -1,0 +1,5 @@
+{
+  "task_id": "iterative-refinement-demo",
+  "prompt": "소규모 팀이 사내 위키를 도입할 때 후보 도구 3가지를 조사해줘. 각 도구의 장단점과 선택 기준을 정리하고, 근거가 되는 출처를 명시해줘.",
+  "constraints": ["team_pattern:iterative_refinement"]
+}

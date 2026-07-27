@@ -99,6 +99,71 @@ class JudgeTest(unittest.TestCase):
         self.assertIsNotNone(judging.latency_ms)  # MockProvider judge 응답은 latency_ms=5 고정
 
 
+class CheckPassTest(unittest.TestCase):
+    """iterative_refinement용 합격 판정(judge.check_pass) — evaluate()와 다른
+    프롬프트/응답 형식이라 MockProvider(profile="judge")가 아닌 전용 스텁으로 검증한다."""
+
+    class _VerdictProvider(Provider):
+        def __init__(self, config: ProviderConfig, response: str) -> None:
+            super().__init__(config)
+            self.response = response
+
+        def generate(self, prompt: str, *, temperature: float = 0.7) -> Candidate:
+            return Candidate(model_id=self.model_id, content=self.response, latency_ms=5, status="success")
+
+    def make_evaluator(self, response: str) -> Provider:
+        return self._VerdictProvider(ProviderConfig(provider_id="eval", model_id="eval-mock"), response)
+
+    def test_passed_true_parses(self) -> None:
+        evaluator = self.make_evaluator('{"passed": true, "feedback": ""}')
+
+        verdict = judge.check_pass("충분한 답변", rubric=["명확성"], judge_provider=evaluator)
+
+        self.assertTrue(verdict.passed)
+        self.assertEqual(verdict.feedback, "")
+        self.assertIsNotNone(verdict.latency_ms)
+
+    def test_passed_false_returns_feedback(self) -> None:
+        evaluator = self.make_evaluator('{"passed": false, "feedback": "근거를 추가하라"}')
+
+        verdict = judge.check_pass("부실한 답변", rubric=["명확성"], judge_provider=evaluator)
+
+        self.assertFalse(verdict.passed)
+        self.assertEqual(verdict.feedback, "근거를 추가하라")
+
+    def test_prompt_contains_rubric_and_content(self) -> None:
+        captured: list[str] = []
+
+        class _Capture(Provider):
+            def generate(self, prompt: str, *, temperature: float = 0.7) -> Candidate:
+                captured.append(prompt)
+                return Candidate(model_id=self.model_id, content='{"passed": true, "feedback": ""}', status="success")
+
+        evaluator = _Capture(ProviderConfig(provider_id="eval", model_id="eval-mock"))
+        judge.check_pass("평가 대상 콘텐츠", rubric=["출처 신뢰성"], judge_provider=evaluator)
+
+        self.assertIn("출처 신뢰성", captured[0])
+        self.assertIn("평가 대상 콘텐츠", captured[0])
+
+    def test_non_json_response_raises_judge_error(self) -> None:
+        evaluator = self.make_evaluator("이건 JSON이 아니다")
+
+        with self.assertRaises(judge.JudgeError):
+            judge.check_pass("답변", rubric=["명확성"], judge_provider=evaluator)
+
+    def test_missing_passed_bool_raises_judge_error(self) -> None:
+        evaluator = self.make_evaluator('{"passed": "yes", "feedback": ""}')
+
+        with self.assertRaises(judge.JudgeError):
+            judge.check_pass("답변", rubric=["명확성"], judge_provider=evaluator)
+
+    def test_evaluator_permanent_failure_raises_judge_error(self) -> None:
+        failing = _StaticProvider(ProviderConfig(provider_id="eval", model_id="eval-mock"))
+
+        with self.assertRaises(judge.JudgeError):
+            judge.check_pass("답변", rubric=["명확성"], judge_provider=failing)
+
+
 class SynthesizerTest(unittest.TestCase):
     def test_adopt_winner_returns_winner_content_only(self) -> None:
         candidates = [

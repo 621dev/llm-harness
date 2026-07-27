@@ -32,7 +32,7 @@ from typing import Iterable, Literal, Optional
 from providers.base import Provider
 
 from . import judge, live_status, model_runner, planner, router, run_store, safety, subagent_runner, synthesizer
-from .schemas import Approval, DelegationStep, Observation, Plan, RunMetrics, TaskInput
+from .schemas import Approval, DelegationStep, Observation, Plan, RefinementRound, RunMetrics, TaskInput
 
 MIN_CANDIDATES = 2  # Section 6: fan_out_judge, 이 이상 성공해야 평가를 진행한다
 
@@ -40,6 +40,13 @@ MIN_CANDIDATES = 2  # Section 6: fan_out_judge, 이 이상 성공해야 평가�
 # 이 키로 등록해두면 candidate 선택(_candidate_providers)에서는 제외되고
 # judge.evaluate()에만 전달된다.
 JUDGE_PROVIDER_KEY = "__judge__"
+
+# iterative_refinement의 라운드 상한 (Section 6 "무한 재시도 금지"와 같은 철학).
+# 라운드마다 generator+evaluator 2회 호출이 발생하므로 최악의 경우 LLM 호출 수는
+# MAX_REFINEMENT_ROUNDS * 2 (+재시도)다. 상한 도달 시 마지막 시도를 partial로 승격한다.
+# 비용 직결 값이라 config.json의 max_refinement_rounds로 조정 가능 — cli.py가
+# MAX_SUBSCRIPTION_CANDIDATES와 같은 방식으로 실행 시 반영한다.
+MAX_REFINEMENT_ROUNDS = 3
 
 # Section 9 "구독 한도 초과 방지": cli_subscription provider(claude/codex CLI 등)는
 # 5시간/주간 롤링 사용량 한도가 있다. fan_out_judge가 매 run마다 여러 구독 CLI를
@@ -52,6 +59,7 @@ _REPLAY_FILES = (
     "fitness_check.json",
     "approval.json",
     "judging.json",
+    "refinement.json",
     "final.md",
     "safety.md",
     "safety_review.json",
@@ -217,6 +225,8 @@ def _run_pattern(task: TaskInput, plan: Plan, providers: dict[str, Provider], ru
         return _run_fan_out_judge(task, plan, providers, run_dir)
     if plan.team_pattern == "hierarchical_delegation":
         return _run_hierarchical_delegation(task, plan, providers, run_dir)
+    if plan.team_pattern == "iterative_refinement":
+        return _run_iterative_refinement(task, plan, providers, run_dir)
     raise ValueError(f"unknown team_pattern: {plan.team_pattern!r}")
 
 
@@ -350,6 +360,133 @@ def _run_hierarchical_delegation(
     return _finalize(
         run_dir, final_content, errors=[], latency_ms=latency_ms, cost_usd=cost_usd, completed=completed,
         failed=failed, stage="hierarchical_delegation",
+    )
+
+
+def _run_iterative_refinement(
+    task: TaskInput, plan: Plan, providers: dict[str, Provider], run_dir: Path
+) -> Observation:
+    """생성 → 합격 판정 → 피드백 반영 재생성을 반복한다 (반복 개선 루프).
+
+    fan_out_judge가 "여러 후보를 병렬로 만들어 비교"라면, 이 패턴은 "한 계보를
+    피드백으로 반복 개선"이다(revfactory/harness v2의 모드 B에 대응). evaluator는
+    fan_out_judge와 같은 JUDGE_PROVIDER_KEY 등록 인프라를 재사용한다.
+
+    실패 처리 철학은 hierarchical_delegation의 partial 승격과 동일하다 — 라운드
+    상한 도달/중간 실패 시 마지막으로 생성에 성공한 내용을 버리지 않고 partial로
+    승격하고, 미통과/실패 기록은 errors.json에 남긴다.
+    """
+    judge_provider = providers.get(JUDGE_PROVIDER_KEY)
+    if judge_provider is None:
+        raise ValueError(
+            f"iterative_refinement에는 evaluator용 provider가 필요하다 "
+            f"(providers[{JUDGE_PROVIDER_KEY!r}]에 등록, fan_out_judge의 judge와 동일)"
+        )
+
+    candidate_providers = _candidate_providers(providers)
+    if not candidate_providers:
+        raise ValueError("iterative_refinement에는 generator용 provider가 최소 1개 필요하다")
+    generator = next(iter(candidate_providers.values()))
+
+    rounds: list[RefinementRound] = []
+    errors: list[dict[str, str]] = []
+    latency_parts: list[Optional[int]] = []
+    cost_parts: list[Optional[float]] = []
+    last_content: Optional[str] = None
+    generated_count = 0
+    generation_failed = False
+    passed = False
+    prompt = task.prompt
+
+    for round_index in range(1, MAX_REFINEMENT_ROUNDS + 1):
+        candidate = model_runner.generate_with_retry(generator, prompt)
+        latency_parts.append(candidate.latency_ms)
+        cost_parts.append(candidate.cost_usd)
+
+        if candidate.status == "error":
+            generation_failed = True
+            errors.append(
+                {
+                    "stage": f"refinement round {round_index}",
+                    "message": f"생성이 재시도까지 실패해 루프 중단: {candidate.content}",
+                }
+            )
+            break
+        last_content = candidate.content
+        generated_count += 1
+
+        try:
+            verdict = judge.check_pass(candidate.content, plan.rubric, judge_provider)
+        except judge.JudgeError as exc:
+            errors.append({"stage": f"refinement round {round_index} evaluator", "message": str(exc)})
+            break
+        latency_parts.append(verdict.latency_ms)
+        cost_parts.append(verdict.cost_usd)
+
+        rounds.append(
+            RefinementRound(
+                round_index=round_index,
+                content=candidate.content,
+                passed=verdict.passed,
+                feedback=verdict.feedback,
+                latency_ms=_sum_optional_int([candidate.latency_ms, verdict.latency_ms]),
+                cost_usd=_sum_optional_float([candidate.cost_usd, verdict.cost_usd]),
+            )
+        )
+
+        if verdict.passed:
+            passed = True
+            break
+        prompt = _build_refinement_prompt(task.prompt, candidate.content, verdict.feedback)
+
+    run_store.write_json(run_dir, "refinement.json", [r.model_dump(mode="json") for r in rounds])
+
+    failed = 1 if generation_failed else 0
+    latency_ms = _sum_optional_int(latency_parts)
+    cost_usd = _sum_optional_float(cost_parts)
+
+    if last_content is None:
+        return _finalize_without_output(
+            run_dir, errors=errors, latency_ms=latency_ms, cost_usd=cost_usd, completed=0, failed=failed
+        )
+
+    if passed:
+        return _finalize(
+            run_dir, last_content, errors=errors, latency_ms=latency_ms, cost_usd=cost_usd,
+            completed=generated_count, failed=failed, stage="iterative_refinement",
+            success_summary=f"iterative_refinement run 완료 — {len(rounds)}라운드 만에 rubric 통과",
+        )
+
+    if not errors:
+        errors.append(
+            {
+                "stage": "iterative_refinement",
+                "message": f"라운드 상한({MAX_REFINEMENT_ROUNDS}회)까지 rubric을 통과하지 못함",
+            }
+        )
+    return _finalize(
+        run_dir, last_content, errors=errors, latency_ms=latency_ms, cost_usd=cost_usd,
+        completed=generated_count, failed=failed, stage="iterative_refinement_partial",
+        content_prefix="(partial) ",
+        success_summary=(
+            f"rubric을 통과하지 못한 채 루프 종료 — 마지막 생성 결과를 partial로 승격"
+            f" (실행 {generated_count}라운드)"
+        ),
+    )
+
+
+def _build_refinement_prompt(original_prompt: str, previous_content: str, feedback: str) -> str:
+    return (
+        "다음 요청에 대한 이전 답변이 심사에서 통과하지 못했다. 심사 피드백을 반영해 "
+        "답변을 다시 작성하라.\n\n"
+        "## 원래 요청\n"
+        f"{original_prompt}\n\n"
+        "## 이전 답변\n"
+        f"{previous_content}\n\n"
+        "## 심사 피드백\n"
+        f"{feedback}\n\n"
+        "## 지시\n"
+        "피드백에서 지적된 문제를 모두 해결한, 완성된 답변만 출력하라 (수정 과정 설명 없이).\n"
     )
 
 

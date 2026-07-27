@@ -145,6 +145,44 @@ class SubagentRunnerTest(unittest.TestCase):
 
         self.assertEqual([o.summary for o in observations_a], [o.summary for o in observations_b])
 
+    def test_first_step_receives_scoped_instruction_not_bare_prompt(self) -> None:
+        # 회귀 방지(2026-07-27 실제로 겪음): 첫 스텝에 task.prompt 원문이 아무 스코핑
+        # 없이 그대로 들어가면, "리서치해줘 ... 그 다음 검토해줘"처럼 여러 역할의 작업이
+        # 한 문장에 묶인 프롬프트를 첫 스텝(research)이 혼자 다 처리하려고 시도한다
+        # (실제로 codex CLI가 이걸 통째로 처리하려다 타임아웃 — subagent_runner.py 모듈
+        # docstring 참고). 첫 스텝 입력에 "당신의 역할은 'research'" 같은 스코핑 문구가
+        # 반드시 붙어야 하고, 원본 요청 텍스트도 그대로 보존돼야 한다.
+        steps, providers = make_two_step_chain()
+
+        subagent_runner.run_chain(steps, providers, "이 프로젝트를 리서치해줘", self.run_dir)
+
+        step1_content = (self.run_dir / steps[0].output_ref).read_text(encoding="utf-8")
+        self.assertIn("당신의 역할은 'research'", step1_content)
+        self.assertIn("이후 단계는 다른 담당자가 이어받아", step1_content)
+        self.assertIn("이 프로젝트를 리서치해줘", step1_content)  # 원본 요청도 보존돼야 함
+
+    def test_continuation_step_receives_different_instruction_than_first_step(self) -> None:
+        # 이어받는 스텝(design_review)은 "이전 단계 결과물"이라는 다른 문구로
+        # 스코핑돼야 한다 — 첫 스텝과 같은 "요청:" 문구를 쓰면 이전 단계 결과를
+        # 새 원본 요청으로 착각할 수 있다.
+        steps, providers = make_two_step_chain()
+
+        subagent_runner.run_chain(steps, providers, "이 프로젝트를 리서치해줘", self.run_dir)
+
+        step2_content = (self.run_dir / steps[1].output_ref).read_text(encoding="utf-8")
+        self.assertIn("당신의 역할은 'design_review'", step2_content)
+        self.assertIn("이전 단계 결과물입니다", step2_content)
+
+    def test_input_ref_preview_reflects_raw_content_not_instruction_wrapper(self) -> None:
+        # step.input_ref는 디버깅용 미리보기라 스코핑 지시문이 아니라 실제 입력 내용을
+        # 보여줘야 한다(안 그러면 모든 스텝의 input_ref가 똑같은 지시문 문구로만 보임).
+        steps, providers = make_two_step_chain()
+
+        subagent_runner.run_chain(steps, providers, "이 프로젝트를 리서치해줘", self.run_dir)
+
+        self.assertEqual(steps[0].input_ref, "이 프로젝트를 리서치해줘")
+        self.assertNotIn("당신의 역할은", steps[0].input_ref)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -373,7 +373,7 @@ def render_guide_html(*, back_href: str = DEFAULT_DASHBOARD_FILENAME) -> str:
   <tr><th>도메인</th><td>어느 도메인 소속인지(harness-mvp, cloud-ops 등) — run 저장 경로에서 자동 추출</td></tr>
   <tr><th>작업명</th><td>task_id — input.json에 저장된 짧은 이름(예: fan-out-demo)</td></tr>
   <tr><th>run_id</th><td>실행 하나하나를 구분하는 전체 이름(예: run-fan-out-demo)</td></tr>
-  <tr><th>team_pattern</th><td>fan_out_judge(여러 모델 비교) / hierarchical_delegation(역할별 순차 위임) / direct_call(단순 1회 호출) / direct_output(LLM 없이 결정론적으로 파일만 생성)</td></tr>
+  <tr><th>team_pattern</th><td>fan_out_judge(여러 모델 비교) / hierarchical_delegation(역할별 순차 위임) / iterative_refinement(생성-평가 반복 개선) / direct_call(단순 1회 호출) / direct_output(LLM 없이 결정론적으로 파일만 생성)</td></tr>
   <tr><th>상태</th><td>아래 "상태 값" 표 참고</td></tr>
   <tr><th>경과</th><td>시작 시각부터 지금까지 흐른 시간(이 기능 이전 run은 "-")</td></tr>
   <tr><th>요청 내용</th><td>원래 요청(prompt) 또는 "N개 파일 생성: ..." — 20자 넘으면 접혀있다가 클릭하면 펼쳐짐</td></tr>

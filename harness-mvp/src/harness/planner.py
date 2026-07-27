@@ -37,12 +37,22 @@ _DEFAULT_DELEGATION_ROLES: dict[str, list[str]] = {
 _HIGH_RISK_KEYWORDS = ("배포", "삭제", "프로덕션", "production", "결제", "개인정보", "금융")
 _MEDIUM_RISK_KEYWORDS = ("설계", "아키텍처", "정책", "계약")
 _RISK_OVERRIDE_PREFIX = "risk_level:"
+_TEAM_PATTERN_OVERRIDE_PREFIX = "team_pattern:"
+_VALID_TEAM_PATTERNS = ("fan_out_judge", "hierarchical_delegation", "iterative_refinement")
 
 
 def create_plan(task: TaskInput) -> Plan:
     """task를 받아 team_pattern까지 확정된 Plan을 만든다."""
     hint = router.classify_team_pattern(task)
     task_type, team_pattern = hint if hint is not None else (_DEFAULT_TASK_TYPE, _DEFAULT_TEAM_PATTERN)
+
+    # 명시적 override가 있으면 router 분류보다 우선한다 (_infer_risk_level의
+    # "risk_level:" override와 대칭). iterative_refinement는 라운드마다 LLM을 2회
+    # (generator+evaluator) 호출하는 고비용 패턴이라 키워드 자동 라우팅을 두지
+    # 않고 이 opt-in으로만 진입하게 한다.
+    override = _team_pattern_override(task)
+    if override is not None:
+        team_pattern = override
 
     risk_level = _infer_risk_level(task)
     rubric = _DEFAULT_RUBRICS.get(task_type, list(_DEFAULT_RUBRIC))
@@ -57,6 +67,15 @@ def create_plan(task: TaskInput) -> Plan:
             num_candidates=_DEFAULT_NUM_CANDIDATES,
         )
 
+    if team_pattern == "iterative_refinement":
+        return Plan(
+            task_id=task.task_id,
+            task_type=task_type,
+            risk_level=risk_level,
+            rubric=rubric,
+            team_pattern=team_pattern,
+        )
+
     roles = _DEFAULT_DELEGATION_ROLES.get(task_type, ["research", "design_review"])
     delegation_chain = [DelegationStep(role=role, provider_id=f"{role}-mock") for role in roles]
     return Plan(
@@ -67,6 +86,15 @@ def create_plan(task: TaskInput) -> Plan:
         team_pattern=team_pattern,
         delegation_chain=delegation_chain,
     )
+
+
+def _team_pattern_override(task: TaskInput) -> TeamPattern | None:
+    for constraint in task.constraints:
+        if constraint.startswith(_TEAM_PATTERN_OVERRIDE_PREFIX):
+            pattern = constraint[len(_TEAM_PATTERN_OVERRIDE_PREFIX):]
+            if pattern in _VALID_TEAM_PATTERNS:
+                return pattern  # type: ignore[return-value]
+    return None
 
 
 def _infer_risk_level(task: TaskInput) -> RiskLevel:

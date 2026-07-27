@@ -47,6 +47,9 @@ class HarnessConfig(BaseModel):
     - max_subscription_candidates: fan_out_judge 한 run에서 동시에 쓸 수
       있는 auth_mode="cli_subscription" provider 최대 개수(Section 9 구독
       한도 보호).
+    - max_refinement_rounds: iterative_refinement의 라운드 상한(ADR 0006).
+      라운드마다 generator+evaluator 2회 호출이 발생하므로 비용에 직결된다 —
+      최악의 경우 LLM 호출 수는 이 값 × 2 (+재시도).
     """
 
     candidate_models: list[str] = Field(default_factory=lambda: ["claude", "codex", "gemini"])
@@ -54,6 +57,7 @@ class HarnessConfig(BaseModel):
     delegation_model: str = "claude"
     delegation_role_models: dict[str, str] = Field(default_factory=dict)
     max_subscription_candidates: int = 1
+    max_refinement_rounds: int = 3
 
 
 def load_config(path: Path | None = None) -> HarnessConfig:
