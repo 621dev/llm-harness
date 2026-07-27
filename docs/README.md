@@ -5,7 +5,7 @@
 - **지금 진행 상황만 빠르게**: `03_진행상황/harness-progress-checklist-ko.md`
 - **완전히 새 환경/새 머신에서 자기완결적으로 이어가기**: `03_진행상황/` 안
   가장 최신 `harness-handoff-summary-vN-ko.md`(번호 최대 = 최신 — push할
-  때마다 새 버전 추가, 옛 버전 정리, 2026-07-27 기준 v15)
+  때마다 새 버전 추가, 옛 버전 정리, 2026-07-27 기준 v16)
 - **진행 규칙**(git 워크플로우, 테스트/리뷰 원칙, 언어 정책 등):
   `00_작업규칙/harness-project-conventions-ko.md`
 
@@ -50,7 +50,7 @@ gaebalai/claude-code-orchestrator, jikime/harness-lab) + 하네스 기본 개념
   내용, 이유(스코프 결정 포함), 의도적으로 안 한 것, 알려진 갭까지 기록.
   "왜 이렇게 했는지" 참고용. Step 종료 시마다 갱신.
 - `harness-handoff-summary-vN-ko.md` — 자기완결적 인수인계 요약. push할 때마다
-  최신 상태로 새 버전 추가(예: v15). **옛 버전은 최신 버전에 전부 흡수 —
+  최신 상태로 새 버전 추가(예: v16). **옛 버전은 최신 버전에 전부 흡수 —
   보관 안 함**(2026-07-24 정리 — v2~v12가 detail 문서와 중복 내용이라 삭제,
   v2를 인용하던 `02_구현플랜/harness-implementation-plan-ko.md`도 함께 갱신).
 
