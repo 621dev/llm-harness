@@ -392,12 +392,41 @@ def _run_hierarchical_delegation(
             subscription_calls=subscription_calls, completed=completed, failed=failed
         )
 
-    final_content = run_store.read_markdown(run_dir, executed_steps[-1].output_ref)
     return _finalize(
-        run_dir, final_content, errors=[], latency_ms=latency_ms, cost_usd=cost_usd,
+        run_dir, _render_chain_final(run_dir, executed_steps), errors=[],
+        latency_ms=latency_ms, cost_usd=cost_usd,
         subscription_calls=subscription_calls, completed=completed,
         failed=failed, stage="hierarchical_delegation",
     )
+
+
+def _render_chain_final(run_dir: Path, steps: list[DelegationStep]) -> str:
+    """성공한 스텝들의 본문을 엮어 최종 산출물을 만든다.
+
+    **왜 마지막 스텝만 쓰지 않는가**(2026-07-28 패턴 부가가치 측정에서 발견):
+    예전에는 `steps[-1]`의 출력을 그대로 final.md로 삼았는데, `[research,
+    design_review]`처럼 마지막이 "검토" 역할인 체인에서는 최종 산출물이 사용자가
+    요청한 내용이 아니라 **그것에 대한 리뷰 코멘트**가 됐다. 요청한 내용은
+    중간 산출물(`artifacts/chain/step-1-*.md`)에만 남아 final.md에서는 보이지
+    않았고, 그래서 direct_call과 비교 측정했을 때 체인이 불리하게 나왔다 —
+    품질 문제가 아니라 "다른 물건을 내놓고 있던" 문제였다.
+
+    LLM을 한 번 더 불러 합성하지 않고 규칙 기반으로 엮는다: fan_out_judge의
+    synthesizer도 규칙 기반이고, 체인 run마다 호출을 추가하는 건 "필요할 때만
+    만든다" 원칙(ADR 0003/0005)에 어긋난다. 스텝이 하나뿐이면 역할 제목 없이
+    본문만 — 1스텝 체인에까지 구조를 씌우면 소음이다.
+    """
+    successful = [step for step in steps if step.status == "success"]
+    if not successful:
+        return ""
+    if len(successful) == 1:
+        return subagent_runner.read_step_content(run_dir, successful[0])
+
+    sections = [
+        f"## {index}. {step.role}\n\n{subagent_runner.read_step_content(run_dir, step)}"
+        for index, step in enumerate(successful, start=1)
+    ]
+    return "\n\n---\n\n".join(sections)
 
 
 def _run_iterative_refinement(
@@ -702,15 +731,17 @@ def _finalize_partial_chain(
             next_actions=["ask_user"],
         )
 
-    partial_content = run_store.read_markdown(run_dir, last_success.output_ref)
+    # 성공한 스텝을 전부 엮는다 — 정상 완주 경로와 같은 구성 규칙을 쓴다
+    # (마지막 성공 스텝만 올리면 그 앞 단계의 산출물이 final.md에서 사라진다).
     return _finalize(
-        run_dir, partial_content, errors=errors, latency_ms=latency_ms, cost_usd=cost_usd,
+        run_dir, _render_chain_final(run_dir, executed_steps), errors=errors,
+        latency_ms=latency_ms, cost_usd=cost_usd,
         subscription_calls=subscription_calls,
         completed=completed, failed=failed, stage="hierarchical_delegation_partial",
         content_prefix="(partial) ",
         success_summary=(
-            f"체인이 '{failed_step.role}' 단계에서 중단됨 — 마지막 성공 단계"
-            f"('{last_success.role}') 결과를 partial로 승격"
+            f"체인이 '{failed_step.role}' 단계에서 중단됨 — 그 앞까지 성공한 단계"
+            f"({completed}개) 결과를 partial로 승격"
         ),
     )
 

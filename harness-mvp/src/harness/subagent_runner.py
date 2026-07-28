@@ -126,7 +126,12 @@ def run_chain(
         if obs.status == "error":
             return observations, False  # 체인 중단, 나머지 스텝은 실행하지 않음
 
-        current_input = run_store.read_markdown(run_dir, step.output_ref)
+        # 다음 스텝에는 **본문만** 넘긴다. 예전엔 스텝 파일을 통째로 읽어서
+        # 넘겼는데, 그러면 디버깅용 헤더("- status: success / - tokens: 43 /
+        # - latency_ms: 10")까지 다음 모델의 프롬프트에 들어간다 — 토큰 낭비이자
+        # "이 status가 내가 판단할 대상인가?" 같은 혼선 요인이다
+        # (2026-07-28 체인 최종 산출물 구성을 고치다 테스트가 잡아냄).
+        current_input = read_step_content(run_dir, step)
 
     return observations, True
 
@@ -147,3 +152,27 @@ def _render_step_markdown(step: DelegationStep, candidate: Candidate) -> str:
         f"- latency_ms: {candidate.latency_ms}\n\n"
         f"{candidate.content}\n"
     )
+
+
+# 스텝 파일의 메타데이터 블록 마지막 줄. 본문은 그 뒤 빈 줄 다음부터다.
+_STEP_META_LAST_FIELD = "\n- latency_ms: "
+
+
+def read_step_content(run_dir: Path, step: DelegationStep) -> str:
+    """스텝 산출물에서 메타데이터 헤더를 뺀 **본문만** 돌려준다.
+
+    스텝 파일은 디버깅용이라 제목/status/tokens/latency 헤더를 달고 있는데
+    (`_render_chain_step_markdown`), 이걸 그대로 최종 산출물에 넣으면 사용자가
+    보는 final.md가 "# Chain Step design_review (design_review-mock) - status:
+    success - tokens: 1661..."로 시작한다(2026-07-28 측정에서 실제로 관측).
+    발행물에 내부 메타데이터가 섞이지 않게 여기서 걷어낸다.
+
+    형식이 다르면(이 헤더 도입 이전 run 등) 통째로 돌려준다 — 본문을 잃느니
+    메타데이터가 섞이는 편이 낫다.
+    """
+    raw = run_store.read_markdown(run_dir, step.output_ref)
+    meta_end = raw.find(_STEP_META_LAST_FIELD)
+    if meta_end == -1:
+        return raw.strip()
+    body_start = raw.find("\n\n", meta_end)
+    return raw[body_start + 2 :].strip() if body_start != -1 else raw.strip()
