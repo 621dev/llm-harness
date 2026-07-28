@@ -86,6 +86,19 @@ class GeminiApiProviderTest(unittest.TestCase):
         with self.assertRaises(ProviderError) as ctx:
             self.provider.generate("1+1은?")
         self.assertIn("API key not valid", str(ctx.exception))
+        self.assertFalse(ctx.exception.is_quota_error)  # 400은 quota 문제가 아님
+
+    @patch("providers.api_provider.requests.post")
+    def test_429_status_marks_quota_error(self, mock_post) -> None:
+        # 회귀 방지(2026-07-27 QuotaFallbackProvider 도입): 429는 호출 한도 소진이라
+        # is_quota_error가 서야 QuotaFallbackProvider가 대체 provider로 넘어간다.
+        mock_post.return_value = make_response(
+            429, {"error": {"code": 429, "message": "You exceeded your current quota"}}
+        )
+
+        with self.assertRaises(ProviderError) as ctx:
+            self.provider.generate("1+1은?")
+        self.assertTrue(ctx.exception.is_quota_error)
 
     @patch("providers.api_provider.requests.post")
     def test_non_json_200_response_raises(self, mock_post) -> None:

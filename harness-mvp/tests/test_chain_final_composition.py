@@ -40,7 +40,7 @@ def delegation_providers(*, fail_times: dict[str, int] | None = None) -> dict[st
             profile="detailed",
             fail_times=fail_times.get(f"{role}-mock", 0),
         )
-        for role in ("research", "design_review", "implementation_review")
+        for role in ("research", "design_review", "implementation_review", "content_finalization")
     }
 
 
@@ -61,7 +61,8 @@ class ChainFinalCompositionTest(unittest.TestCase):
 
         plan = run_store.read_json(run_dir, "plan.json")
         roles = [step["role"] for step in plan["delegation_chain"]]
-        self.assertEqual(roles, ["research", "design_review"])  # 전제 확인
+        # 2026-07-27 content_finalization 추가로 research 기본 체인이 3단계가 됨(전제 확인)
+        self.assertEqual(roles, ["research", "design_review", "content_finalization"])
 
         for index, role in enumerate(roles, start=1):
             with self.subTest(role=role):

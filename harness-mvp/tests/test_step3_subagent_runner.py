@@ -183,6 +183,39 @@ class SubagentRunnerTest(unittest.TestCase):
         self.assertEqual(steps[0].input_ref, "이 프로젝트를 리서치해줘")
         self.assertNotIn("당신의 역할은", steps[0].input_ref)
 
+    def test_third_step_sees_original_request_and_all_prior_outputs(self) -> None:
+        # 회귀 방지(2026-07-27 content_finalization 역할 추가 중 실제로 겪음): 직전
+        # 스텝 출력만 넘기면 3번째 스텝(예: content_finalization)은 2번째 스텝의
+        # 비평만 보고 1번째 스텝(research)의 원본 초안을 못 본다 — 비평이 가리키는
+        # 원문이 뭔지 모른 채 최종 결과물을 써야 하는 모순이 생긴다. 히스토리를
+        # 누적해서 넘겨야 몇 단계든 이전 결과 전부를 볼 수 있다.
+        steps = [
+            DelegationStep(role="research", provider_id="gemini-mock"),
+            DelegationStep(role="design_review", provider_id="codex-mock"),
+            DelegationStep(role="content_finalization", provider_id="claude-mock"),
+        ]
+        providers = {
+            "gemini-mock": MockProvider(
+                ProviderConfig(provider_id="gemini-mock", model_id="gemini-mock"), profile="detailed"
+            ),
+            "codex-mock": MockProvider(
+                ProviderConfig(provider_id="codex-mock", model_id="codex-mock"), profile="concise"
+            ),
+            "claude-mock": MockProvider(
+                ProviderConfig(provider_id="claude-mock", model_id="claude-mock"), profile="creative"
+            ),
+        }
+
+        observations, completed = subagent_runner.run_chain(
+            steps, providers, "이 프로젝트를 리서치해줘", self.run_dir
+        )
+
+        self.assertTrue(completed)
+        step3_content = (self.run_dir / steps[2].output_ref).read_text(encoding="utf-8")
+        self.assertIn("이 프로젝트를 리서치해줘", step3_content)  # 원본 요청
+        self.assertIn("gemini-mock", step3_content)  # 1단계(research) 결과
+        self.assertIn("codex-mock", step3_content)  # 2단계(design_review) 결과
+
 
 if __name__ == "__main__":
     unittest.main()

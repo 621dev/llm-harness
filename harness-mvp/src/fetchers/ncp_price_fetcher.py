@@ -220,12 +220,22 @@ class NcpServerPriceFetcher(Fetcher):
             )
             if hourly is None:
                 continue
+            price_value = hourly.get("price")
+            # 0원/시간짜리 SKU가 카탈로그에 섞여 있다(2026-07-28 실제로 재현: vCPU 1개/
+            # 메모리 1GB 조회 시 "SPSVRSTAND000056A" 가 0원으로 나와 candidates[0](최저가)이
+            # 그걸 골라버림 — 실제 판매 상품이 아니라 사용 중단된/레거시 카탈로그 잔재로
+            # 보인다. 실제 서버를 0원에 쓸 수 있을 리 없으니 0 이하 가격은 애초에 후보에서
+            # 뺀다(aws_price_fetcher.py가 BYOL/capacitystatus로 anomaly를 거르는 것과 같은
+            # 이유 — "그 스펙에 존재하는 모든 후보를 숨기지 않는다"는 원칙은 유효하되,
+            # 구매 불가능한 0원 항목까지 "후보"로 셀 이유는 없다).
+            if price_value is None or price_value <= 0:
+                continue
             candidates.append(
                 {
                     "product_code": product.get("productCode"),
                     "product_name": product.get("productName"),
                     "price_no": hourly.get("priceNo"),
-                    "krw_per_hour": hourly.get("price"),
+                    "krw_per_hour": price_value,
                 }
             )
         return candidates

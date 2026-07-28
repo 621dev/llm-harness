@@ -40,10 +40,18 @@ class HarnessConfig(BaseModel):
       명시 안 된 역할에 쓸 기본 모델(역할 분담을 안 쓰면 사실상 전체 역할에
       쓰임 — 기존 동작과 동일).
     - delegation_role_models: hierarchical_delegation의 역할(research/
-      design_review/implementation_review)별로 다른 모델을 쓰고 싶을 때만
-      채운다(역할 분담, 2026-07-14). 명시 안 된 역할은 delegation_model로
-      대체된다. 빈 dict(기본값)면 이전 동작과 완전히 동일 — 전체 역할이
-      delegation_model 하나로 통일된다.
+      design_review/implementation_review/content_finalization)별로 다른
+      모델을 쓰고 싶을 때만 채운다(역할 분담, 2026-07-14). 명시 안 된 역할은
+      delegation_model로 대체된다. 빈 dict(기본값)면 이전 동작과 완전히
+      동일 — 전체 역할이 delegation_model 하나로 통일된다.
+    - delegation_role_fallback_models: 역할별 1차 모델이 호출 한도(quota/
+      rate-limit)로 실패했을 때 대신 쓸 모델(2026-07-27,
+      `providers.fallback_provider.QuotaFallbackProvider`). 예:
+      `{"research": "codex"}` — research 자리 모델(예: gemini)이 429로
+      실패하면 codex로 자동 전환. 명시 안 된 역할은 폴백 없이 기존처럼
+      실패가 그대로 기록된다. 한도 소진이 아닌 다른 실패(응답 형식 오류,
+      인증 실패 등)는 폴백하지 않고 그대로 전파된다 — "실패를 조용히
+      감추지 않는다"는 원칙은 quota 케이스 하나로만 예외를 둔다.
     - max_subscription_candidates: fan_out_judge 한 run에서 동시에 쓸 수
       있는 auth_mode="cli_subscription" provider 최대 개수(Section 9 구독
       한도 보호).
@@ -59,6 +67,7 @@ class HarnessConfig(BaseModel):
     judge_model: str = "gemini"
     delegation_model: str = "claude"
     delegation_role_models: dict[str, str] = Field(default_factory=dict)
+    delegation_role_fallback_models: dict[str, str] = Field(default_factory=dict)
     max_subscription_candidates: int = 1
     max_refinement_rounds: int = 3
     max_agent_turns: int = 8

@@ -40,8 +40,14 @@ class PlannerTest(unittest.TestCase):
         self.assertEqual(plan.task_type, "research")
         self.assertEqual(plan.team_pattern, "hierarchical_delegation")
         self.assertIsNone(plan.num_candidates)
-        self.assertEqual([step.role for step in plan.delegation_chain], ["research", "design_review"])
-        self.assertEqual([step.provider_id for step in plan.delegation_chain], ["research-mock", "design_review-mock"])
+        self.assertEqual(
+            [step.role for step in plan.delegation_chain],
+            ["research", "design_review", "content_finalization"],
+        )
+        self.assertEqual(
+            [step.provider_id for step in plan.delegation_chain],
+            ["research-mock", "design_review-mock", "content_finalization-mock"],
+        )
 
     def test_sequential_review_uses_review_chain(self) -> None:
         task = make_task("t-3", "설계 리뷰 결과를 반영해서 순차 검토를 진행해줘")

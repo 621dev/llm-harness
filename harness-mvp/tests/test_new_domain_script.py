@@ -183,7 +183,8 @@ class VerifyDomainTest(unittest.TestCase):
         self.assertEqual(result["task_type"], "research")
         self.assertTrue(result["pattern_matches_expected"])
         self.assertEqual(
-            [role for role, _ in result["delegation_chain"]], ["research", "design_review"]
+            [role for role, _ in result["delegation_chain"]],
+            ["research", "design_review", "content_finalization"],
         )
 
     def test_prompt_without_routing_keywords_flags_mismatch(self) -> None:

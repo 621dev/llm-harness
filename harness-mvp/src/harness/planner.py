@@ -29,8 +29,18 @@ _DEFAULT_RUBRIC = ["명확성", "정확성"]
 # hierarchical_delegation의 기본 delegation_chain. provider_id는 "{role}-mock" 규칙을
 # 따른다 — 실제 provider 선택(Phase 3: api_provider/cli_subscription_provider)이 생기기
 # 전까지, 호출부(cli.py/테스트)가 이 규칙에 맞는 이름으로 mock provider를 등록해두면 된다.
+#
+# "research"는 2026-07-27까지 [research, design_review] 2단계였다 —
+# server-engineering-learning 도메인에서 실제 5개 task를 e2e로 돌려보니 final.md(=
+# design_review의 출력)가 실제로는 "다음 단계(콘텐츠 작성)에 전달할 검토 의견"이지
+# 완성된 산출물이 아니었다(design_review가 스스로 "다음 담당자는 콘텐츠 작성/편집
+# 단계"라고 명시). design_review의 비평을 반영해 실제로 완성된 결과물을 쓰는
+# 담당자가 체인에 없었던 구조적 공백 — content_finalization을 3번째 역할로 추가해
+# 메꿨다. subagent_runner.run_chain()도 이 역할이 "원본 요청 + 직전 비평"뿐 아니라
+# research 단계의 원본 초안까지 볼 수 있도록 전체 히스토리를 누적해서 넘기게
+# 같이 고쳤다(모듈 docstring 참고).
 _DEFAULT_DELEGATION_ROLES: dict[str, list[str]] = {
-    "research": ["research", "design_review"],
+    "research": ["research", "design_review", "content_finalization"],
     "sequential_review": ["design_review", "implementation_review"],
 }
 

@@ -41,14 +41,28 @@ _SUMMARY_PREVIEW_CHARS = 120
 
 # 체인의 첫 스텝은 원본 task.prompt(사람이 쓴 통짜 요청)를 받고, 이후 스텝은 이전
 # 스텝의 전체 출력을 받는다 — 받는 내용의 성격이 다르므로 지시문도 둘로 나눈다.
+#
+# "파일을 만들거나 승인을 요청하지 말고..." 문구는 2026-07-27 content_finalization
+# 역할 도입 직후 실제로 겪고 추가함: claude CLI(`ClaudeCliProvider`, 실제로는 Claude
+# Code 자체)가 "최종 산출물을 완성했습니다 (linux-basics.md)... 게시를 승인해
+# 주시면..." 같은 **작업 보고문**만 응답으로 내고, 완성된 문서 본문 자체는 응답
+# 텍스트에 담지 않은 걸 실측으로 확인했다(호출이 격리된 임시 디렉터리에서 실행돼
+# 실제 파일이 생기진 않았지만, 원하던 결과물도 응답에 안 남아 무용해짐). Claude
+# Code는 본질적으로 파일/승인 흐름에 익숙한 코딩 에이전트라 텍스트 완성 요청에도
+# 그 습성이 새어 나온 것으로 보임 — 모든 역할에 공통으로 "행동 대신 완성된 결과물
+# 텍스트 자체를 달라"고 명시해 방지한다.
+_NO_TOOL_USE_INSTRUCTION = (
+    "파일을 만들거나 승인을 요청하지 마세요 — 결과물 전체를 이 응답 텍스트 자체로 "
+    "직접 작성하세요."
+)
 _FIRST_STEP_INSTRUCTION_TEMPLATE = (
     "당신의 역할은 '{role}'입니다. 아래 요청 중 당신의 역할에 해당하는 작업만 "
     "수행하세요 — 이후 단계는 다른 담당자가 이어받아 처리하니 여기서 전부 끝내려고 "
-    "하지 마세요.\n\n요청:\n{content}"
+    "하지 마세요. " + _NO_TOOL_USE_INSTRUCTION + "\n\n요청:\n{content}"
 )
 _CONTINUATION_INSTRUCTION_TEMPLATE = (
     "당신의 역할은 '{role}'입니다. 아래는 이전 단계 결과물입니다. 당신의 역할에 "
-    "맞게 이어서 작업하세요.\n\n이전 단계 결과:\n{content}"
+    "맞게 이어서 작업하세요. " + _NO_TOOL_USE_INSTRUCTION + "\n\n이전 단계 결과:\n{content}"
 )
 
 
@@ -108,7 +122,16 @@ def run_chain(
 ) -> tuple[list[Observation], bool]:
     """delegation_chain을 순서대로 실행한다 (역할별 provider에 순차 위임).
 
-    이전 스텝의 output_ref 파일에서 전체 내용을 다시 읽어 다음 스텝의 입력으로 넘긴다.
+    첫 스텝은 원본 요청(`initial_input`)을 그대로 받는다. 두 번째 스텝부터는
+    **원본 요청 + 지금까지의 모든 스텝 결과를 누적한 히스토리**를 받는다 —
+    바로 직전 스텝 결과만 넘기던 이전 방식은 2026-07-27 content_finalization
+    역할을 3번째 스텝으로 추가하면서 문제가 됐다: content_finalization이
+    design_review의 비평만 보고 research의 원본 초안을 못 보면, 비평이 가리키는
+    원문이 뭔지 모른 채 최종 산출물을 써야 하는 모순이 생긴다. 누적 히스토리로
+    바꿔서 몇 단계든 이전 결과 전부를 볼 수 있게 했다(2단계 체인의 두 번째
+    스텝도 이제 원본 요청+첫 스텝 결과를 함께 받는데, 원래도 원본 요청 문맥이
+    있는 편이 나으므로 회귀는 아님).
+
     한 스텝이 실패하면 그 시점에서 체인을 중단한다.
 
     반환값: (지금까지의 Observation 목록, 체인이 끝까지 완주했는지 여부).
@@ -116,22 +139,25 @@ def run_chain(
     스텝들은 아예 실행되지 않는다.
     """
     observations: list[Observation] = []
-    current_input = initial_input
+    history: list[str] = [f"[원본 요청]\n{initial_input}"]
 
     for index, step in enumerate(steps, start=1):
         provider = providers[step.provider_id]
-        obs = delegate(step, provider, current_input, run_dir, index)
+        # 첫 스텝만 원본 요청을 그대로(래핑 없이) 받는다 — 히스토리 헤더가 안 붙어야
+        # delegate()의 input_ref 미리보기가 원본 텍스트 그대로 남는다(디버깅용).
+        step_input = initial_input if index == 1 else "\n\n".join(history)
+        obs = delegate(step, provider, step_input, run_dir, index)
         observations.append(obs)
 
         if obs.status == "error":
             return observations, False  # 체인 중단, 나머지 스텝은 실행하지 않음
 
-        # 다음 스텝에는 **본문만** 넘긴다. 예전엔 스텝 파일을 통째로 읽어서
-        # 넘겼는데, 그러면 디버깅용 헤더("- status: success / - tokens: 43 /
+        # 다음 스텝을 위해 히스토리에 이번 스텝 결과를 추가한다. **본문만** 넣는다 —
+        # 스텝 파일을 통째로 넣으면 디버깅용 헤더("- status: success / - tokens: 43 /
         # - latency_ms: 10")까지 다음 모델의 프롬프트에 들어간다 — 토큰 낭비이자
         # "이 status가 내가 판단할 대상인가?" 같은 혼선 요인이다
         # (2026-07-28 체인 최종 산출물 구성을 고치다 테스트가 잡아냄).
-        current_input = read_step_content(run_dir, step)
+        history.append(f"[{index}단계: {step.role} 결과]\n{read_step_content(run_dir, step)}")
 
     return observations, True
 
@@ -145,8 +171,14 @@ def _preview(text: str) -> str:
 
 
 def _render_step_markdown(step: DelegationStep, candidate: Candidate) -> str:
+    # model_id를 남기는 이유(2026-07-27, QuotaFallbackProvider 도입과 함께 추가):
+    # step.provider_id는 항상 고정된 "{role}-mock"이라 실제로 어떤 모델이 응답했는지
+    # 안 보인다 — quota 폴백이 조용히 다른 모델로 전환해도 흔적이 안 남으면 "실패를
+    # 숨기지 않는다"는 원칙이 무색해진다. model_id는 candidate가 실제로 그 모델에서
+    # 왔음을 보여주는 유일한 필드다.
     return (
         f"# Chain Step {step.role} ({step.provider_id})\n\n"
+        f"- model_id: {candidate.model_id}\n"
         f"- status: {candidate.status}\n"
         f"- tokens: {candidate.tokens}\n"
         f"- latency_ms: {candidate.latency_ms}\n\n"

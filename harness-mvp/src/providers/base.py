@@ -21,7 +21,18 @@ class ProviderError(RuntimeError):
     mock.py, api_provider.py, cli_subscription_provider.py가 전부 이걸 공유한다 —
     model_runner는 provider 구현체가 뭔지 몰라도 이 예외 하나만 알면 재시도 로직을
     똑같이 적용할 수 있다.
-    """
+
+    `is_quota_error`(2026-07-27, `QuotaFallbackProvider` 도입과 함께 추가): 호출
+    한도/rate-limit(예: Gemini 무료 티어 HTTP 429)로 실패했음을 표시한다.
+    `QuotaFallbackProvider`가 이 플래그가 선 예외만 골라 대체 provider로 넘어가고,
+    그 외(응답 형식 오류, 인증 실패 등 진짜 버그일 수 있는 실패)는 그대로
+    전파한다 — 문자열 매칭(예: 에러 메시지에 "429"가 있는지 검사)은 로케일/문구
+    변경에 취약하다는 걸 `worktree-sync` 상태 판정 버그에서 이미 겪어서, 발생
+    지점(api_provider.py)에서 상태 코드를 보고 직접 표시하는 방식을 택했다."""
+
+    def __init__(self, message: str, *, is_quota_error: bool = False) -> None:
+        super().__init__(message)
+        self.is_quota_error = is_quota_error
 
 
 class Provider(ABC):

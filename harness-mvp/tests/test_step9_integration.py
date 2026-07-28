@@ -86,7 +86,7 @@ def all_subscription_fan_out_providers() -> dict[str, MockProvider]:
 
 def delegation_providers(*, fail_times: dict[str, int] | None = None) -> dict[str, MockProvider]:
     fail_times = fail_times or {}
-    roles = ["research", "design_review", "implementation_review"]
+    roles = ["research", "design_review", "implementation_review", "content_finalization"]
     return {
         f"{role}-mock": MockProvider(
             ProviderConfig(provider_id=f"{role}-mock", model_id=f"{role}-mock"),

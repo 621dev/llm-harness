@@ -51,7 +51,7 @@ def mostly_failing_fan_out_providers(_attempt_index: int) -> dict[str, MockProvi
 
 
 def reliable_delegation_providers(_attempt_index: int) -> dict[str, MockProvider]:
-    roles = ["research", "design_review"]
+    roles = ["research", "design_review", "content_finalization"]
     return {
         f"{role}-mock": MockProvider(ProviderConfig(provider_id=f"{role}-mock", model_id=f"{role}-mock"))
         for role in roles

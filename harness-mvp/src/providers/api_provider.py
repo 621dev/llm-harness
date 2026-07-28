@@ -62,9 +62,12 @@ class ApiProvider(Provider):
         latency_ms = int((time.monotonic() - start) * 1000)
 
         if response.status_code != 200:
+            # 429 = rate limit/quota exceeded. QuotaFallbackProvider가 이 플래그로
+            # "대체 provider로 넘어가도 되는 실패"와 "진짜 버그" 실패를 구분한다.
             raise ProviderError(
                 f"{self.provider_id} API 오류 (status={response.status_code}): "
-                f"{self._extract_error_message(response)}"
+                f"{self._extract_error_message(response)}",
+                is_quota_error=response.status_code == 429,
             )
 
         try:

@@ -94,15 +94,16 @@ class MetricsAggregationTest(unittest.TestCase):
         providers = {
             "research-mock": _StubProvider("research-mock", auth_mode="cli_subscription"),
             "design_review-mock": _StubProvider("design_review-mock", auth_mode="cli_subscription"),
-            "implementation_review-mock": _StubProvider(
-                "implementation_review-mock", auth_mode="cli_subscription"
+            "content_finalization-mock": _StubProvider(
+                "content_finalization-mock", auth_mode="cli_subscription"
             ),
         }
 
         orchestrator.run(task, providers, root=self.tmp_dir)
 
-        # 기본 체인은 research + design_review 2스텝 = 구독 호출 2회
-        self.assertEqual(self.metrics_of("run-sub-chain")["subscription_calls"], 2)
+        # 기본 체인은 research + design_review + content_finalization 3스텝
+        # (2026-07-27 content_finalization 추가) = 구독 호출 3회
+        self.assertEqual(self.metrics_of("run-sub-chain")["subscription_calls"], 3)
 
     def test_mixed_auth_modes_count_only_subscription(self) -> None:
         """같은 run 안에 종량제와 구독이 섞여 있으면 구독분만 세야 한다."""
@@ -110,8 +111,8 @@ class MetricsAggregationTest(unittest.TestCase):
         providers = {
             "research-mock": _StubProvider("research-mock", auth_mode="api_key"),
             "design_review-mock": _StubProvider("design_review-mock", auth_mode="cli_subscription"),
-            "implementation_review-mock": _StubProvider(
-                "implementation_review-mock", auth_mode="api_key"
+            "content_finalization-mock": _StubProvider(
+                "content_finalization-mock", auth_mode="api_key"
             ),
         }
 

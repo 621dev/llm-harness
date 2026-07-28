@@ -41,11 +41,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
+from harness import cli as cli_module  # noqa: E402  (체인 역할 목록 재사용)
 from harness import judge, model_runner, orchestrator, run_store  # noqa: E402
 from harness.schemas import ProviderConfig, TaskInput  # noqa: E402
 from providers.api_provider import GeminiApiProvider  # noqa: E402
 from providers.base import Provider, ProviderError  # noqa: E402
 from providers.cli_subscription_provider import ClaudeCliProvider, CodexCliProvider  # noqa: E402
+from providers.fallback_provider import QuotaFallbackProvider  # noqa: E402
 
 # Gemini free tier는 짧은 롤링 윈도우 요청 한도(실측 2026-07-27: limit 20,
 # "retry in ~20s")가 있다 — 첫 측정 시도가 무간격 연속 호출로 429를 맞아 전멸했다.
@@ -93,55 +95,31 @@ def _make(backend: str, provider_id: str) -> Provider:
     return CodexCliProvider(config)
 
 
-class _FallbackProvider(Provider):
-    """primary가 응답 못 하면 fallback으로 넘어간다 (gemini 한도 소진 대비).
-
-    **주의**: 측정 도중에 백엔드가 바뀌면 두 조건이 서로 다른 모델로 돌아가
-    "구조 효과"와 "모델 효과"가 뒤섞인다 — 이 스크립트 설계의 전제(모델 고정)가
-    깨진다. 그래서 대체가 일어나면 `used_fallback`을 남기고 **main이 측정을 즉시
-    중단한다** — 경고만 붙여 저장하면 나중에 그 숫자가 그대로 인용될 위험이 있다.
-
-    정상 경로는 시작 전 프로브로 백엔드를 하나 정하는 것이고(`_resolve_backend`),
-    이 wrapper는 "한 번은 답했는데 곧바로 한도가 끊긴" 경계 상황을 감지하는
-    장치다(2026-07-28 실측: 프로브는 통과했는데 바로 다음 호출부터 429).
-    """
-
-    def __init__(self, primary: Provider, fallback: Provider) -> None:
-        super().__init__(primary.config)
-        self._primary = primary
-        self._fallback = fallback
-        self._last_used = primary
-        self.used_fallback = False
-
-    @property
-    def auth_mode(self) -> str:
-        # 실제로 답한 쪽의 인증 모드를 돌려줘야 model_runner의 구독 호출 집계가 맞는다.
-        return self._last_used.auth_mode
-
-    def generate(self, prompt: str, *, temperature: float = 0.7):
-        try:
-            candidate = self._primary.generate(prompt, temperature=temperature)
-            self._last_used = self._primary
-            return candidate
-        except ProviderError as exc:
-            self._last_used = self._fallback
-            self.used_fallback = True
-            print(f"  [fallback] {self._primary.model_id} 응답 실패 → "
-                  f"{self._fallback.model_id}로 대체: {str(exc)[:90]}")
-            return self._fallback.generate(prompt, temperature=temperature)
-
-
 # 실행 중 대체가 일어났는지 확인하려고 만들어진 wrapper를 모아둔다.
-_FALLBACK_WRAPPERS: list[_FallbackProvider] = []
+_FALLBACK_WRAPPERS: list[QuotaFallbackProvider] = []
 
 
 def _with_safety_net(backend: str, provider_id: str) -> Provider:
-    """gemini로 확정된 경우에만 claude 안전망을 씌운다 — 측정 도중 한도가
-    소진돼도 run 전체가 날아가지 않게. 대체가 일어나면 결과에 경고가 붙는다."""
+    """gemini로 확정된 경우에만 claude 안전망을 씌운다 — 측정 도중 한도가 소진돼도
+    run 전체가 날아가지 않게.
+
+    엔진의 `QuotaFallbackProvider`를 그대로 쓴다(2026-07-28 교체). 처음엔 이
+    스크립트 안에 자체 wrapper를 만들었는데, 같은 날 엔진에 정식 버전이 들어오면서
+    중복이 됐다 — 게다가 자체 wrapper는 **모든** ProviderError에 대체를 걸어서
+    인증 실패 같은 진짜 버그도 조용히 넘겨버렸다. 정식 버전은 quota 오류만 골라
+    대체하고 나머지는 전파하므로 이 측정에도 더 정확하다.
+
+    대체가 일어났는지는 `used_fallback`으로 확인해 main이 측정을 중단한다 —
+    조건마다 모델이 달라지면 비교가 성립하지 않기 때문이다.
+    """
     primary = _make(backend, provider_id)
     if backend != "gemini":
         return primary
-    wrapper = _FallbackProvider(primary, _make("claude", provider_id))
+    wrapper = QuotaFallbackProvider(
+        primary=primary,
+        fallback=_make("claude", provider_id),
+        config=ProviderConfig(provider_id=provider_id, model_id=primary.model_id),
+    )
     _FALLBACK_WRAPPERS.append(wrapper)
     return wrapper
 
@@ -201,14 +179,18 @@ def run_direct(attempt: int) -> dict:
     }
 
 
+# planner가 만드는 체인의 역할 provider를 전부 등록해야 한다 — 하나라도 빠지면
+# subagent_runner가 `providers[step.provider_id]`에서 KeyError로 죽는다.
+# content_finalization은 2026-07-28 merge된 PR #64로 research 체인에 3번째
+# 역할로 추가됐다(그때 이 스크립트가 실제로 깨졌다). 엔진의 역할 목록을 직접
+# 가져와서, 앞으로 역할이 늘어도 여기 손 안 대게 한다.
+_CHAIN_ROLE_PROVIDER_IDS = tuple(f"{role}-mock" for role in cli_module._DELEGATION_ROLES)
+
+
 def run_chain(attempt: int, root: Path) -> dict:
-    """조건 B: orchestrator를 통해 research→design_review 체인 실행 (역할 전부 gemini)."""
-    providers = {
-        "research-mock": _generator("research-mock"),
-        "design_review-mock": _generator("design_review-mock"),
-        "implementation_review-mock": _generator("implementation_review-mock"),
-        orchestrator.JUDGE_PROVIDER_KEY: _evaluator("judge"),
-    }
+    """조건 B: orchestrator를 통해 hierarchical_delegation 체인 실행(역할 전부 같은 백엔드)."""
+    providers: dict = {pid: _generator(pid) for pid in _CHAIN_ROLE_PROVIDER_IDS}
+    providers[orchestrator.JUDGE_PROVIDER_KEY] = _evaluator("judge")
     task = TaskInput(task_id=f"measure-chain-{attempt}", prompt=PROMPT)
     observation = orchestrator.run(task, providers, root=root)
     run_dir = root / f"run-measure-chain-{attempt}"
@@ -223,7 +205,8 @@ def run_chain(attempt: int, root: Path) -> dict:
         "latency_ms": metrics["latency_ms"],
         "cost_usd": metrics["estimated_cost_usd"],
         "subscription_calls": metrics.get("subscription_calls", 0),
-        "llm_calls": 2,
+        # 체인 스텝 수 + evaluator 1회. 역할이 늘면 자동으로 반영된다.
+        "llm_calls": len(run_store.read_json(run_dir, "plan.json")["delegation_chain"]) + 1,
     }
 
 

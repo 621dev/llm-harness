@@ -57,6 +57,7 @@ from typing import Callable, Iterable, Sequence
 from providers.api_provider import GeminiApiProvider
 from providers.base import Provider
 from providers.cli_subscription_provider import ClaudeAgentProvider, ClaudeCliProvider, CodexCliProvider
+from providers.fallback_provider import QuotaFallbackProvider
 
 from . import dashboard, failure_analysis, live_status, orchestrator
 from .config import HarnessConfig, load_config
@@ -78,10 +79,28 @@ _CANDIDATE_PROVIDER_REGISTRY: dict[str, Callable[[str], Provider]] = {
     ),
 }
 
-# hierarchical_delegation 기본 provider 역할 3종 — planner.py가 delegation_chain을
+# hierarchical_delegation 기본 provider 역할 — planner.py가 delegation_chain을
 # 만들 때 provider_id를 "{role}-mock"으로 하드코딩하므로(test_step4_planner.py에서도
-# 이 문자열을 검증) 이름은 그대로 유지한다.
-_DELEGATION_ROLES = ("research", "design_review", "implementation_review")
+# 이 문자열을 검증) 이름은 그대로 유지한다. content_finalization은 2026-07-27
+# planner.py의 _DEFAULT_DELEGATION_ROLES["research"]에 3번째 역할로 추가됨(세부는
+# 그쪽 주석 참고) — 여기 등록 안 하면 그 역할의 provider_id를 못 찾아 KeyError.
+_DELEGATION_ROLES = ("research", "design_review", "implementation_review", "content_finalization")
+
+
+def _wrap_with_quota_fallback(role: str, primary_model: str, fallback_model: str | None) -> Provider:
+    """역할별 provider를 만든다. `fallback_model`이 있으면 1차가 호출 한도(quota)로
+    실패할 때 2차로 자동 전환하는 `QuotaFallbackProvider`로 감싼다(2026-07-27,
+    `config.py`의 `delegation_role_fallback_models` 문서 참고)."""
+    provider_id = f"{role}-mock"
+    primary = _CANDIDATE_PROVIDER_REGISTRY[primary_model](provider_id)
+    if fallback_model is None:
+        return primary
+    fallback = _CANDIDATE_PROVIDER_REGISTRY[fallback_model](f"{provider_id}-fallback")
+    return QuotaFallbackProvider(
+        primary=primary,
+        fallback=fallback,
+        config=ProviderConfig(provider_id=provider_id, model_id=primary.model_id),
+    )
 
 
 def _validate_model_names(names: Iterable[str]) -> None:
@@ -107,13 +126,16 @@ def _default_providers(models: Sequence[str], config: HarnessConfig) -> dict[str
     # delegation_model(기존 동작)을 쓴다 — delegation_role_models가 빈 dict(기본값)면
     # 전체 역할이 delegation_model 하나로 통일되던 이전 동작과 완전히 같다.
     role_models = {role: config.delegation_role_models.get(role, config.delegation_model) for role in _DELEGATION_ROLES}
-    _validate_model_names([config.judge_model, config.delegation_model, *role_models.values()])
+    fallback_models = config.delegation_role_fallback_models
+    _validate_model_names([config.judge_model, config.delegation_model, *role_models.values(), *fallback_models.values()])
 
     providers: dict[str, Provider] = {name: _CANDIDATE_PROVIDER_REGISTRY[name](name) for name in models}
 
     providers.update(
         {
-            f"{role}-mock": _CANDIDATE_PROVIDER_REGISTRY[role_models[role]](f"{role}-mock")
+            f"{role}-mock": _wrap_with_quota_fallback(
+                role, role_models[role], fallback_models.get(role)
+            )
             for role in _DELEGATION_ROLES
         }
     )
@@ -365,12 +387,36 @@ def _git(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess:
     return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
 
 
+def _out(result: subprocess.CompletedProcess) -> str:
+    """stdout/stderr를 합쳐 문자열로 돌려준다.
+
+    `capture_output=True`면 둘 다 str이어야 하는데, 2026-07-28 실제 실행에서
+    `result.stdout`이 None이라 `TypeError`로 죽은 적이 있다(원인은 특정하지 못했다).
+    진단 문구를 만드는 자리에서 죽는 건 얻는 것보다 잃는 게 크므로 방어한다.
+    """
+    return ((result.stdout or "") + (result.stderr or "")).strip()
+
+
+def _has_unmerged_paths(path: Path) -> bool:
+    """이 worktree가 충돌(unmerged) 상태인지 **git 인덱스로** 판정한다.
+
+    stdout에서 "CONFLICT" 문구를 찾는 방식은 두 가지로 취약하다: git이 그 안내를
+    stderr로 보내면 놓치고(2026-07-28 실측 — squash merge된 브랜치에 main을 다시
+    병합해 실제로 충돌했는데 `conflict`가 아니라 `error`로 라벨링되고 출력도 비어
+    나왔다), 로케일/git 버전에 따라 문구 자체도 달라진다.
+
+    이 프로젝트에서 출력 문구에 의존한 판정으로 데인 게 세 번째라(PR #45의
+    "Already up to date" 매칭 → HEAD SHA 비교로 교체) 여기서는 인덱스를 직접 본다.
+    """
+    return bool((_git(["ls-files", "--unmerged"], cwd=path).stdout or "").strip())
+
+
 def _current_branch(path: Path) -> str:
-    return _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=path).stdout.strip()
+    return (_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=path).stdout or "").strip()
 
 
 def _current_commit(path: Path) -> str:
-    return _git(["rev-parse", "HEAD"], cwd=path).stdout.strip()
+    return (_git(["rev-parse", "HEAD"], cwd=path).stdout or "").strip()
 
 
 def sync_worktree_with_main(path: Path) -> dict[str, str]:
@@ -384,16 +430,42 @@ def sync_worktree_with_main(path: Path) -> dict[str, str]:
     실제로 fast-forward/merge 커밋이 생겼는데도 stdout에 "Already up to date"가
     섞여 있어 up_to_date로 잘못 라벨링되는 걸 발견 — SHA 비교는 이 문제 자체가
     성립하지 않음)."""
-    branch = _current_branch(path)
-    before_commit = _current_commit(path)
-    if branch == "main":
-        result = _git(["merge", "--ff-only", "origin/main"], cwd=path)
-    else:
-        result = _git(["merge", "origin/main", "--no-edit"], cwd=path)
+    try:
+        branch = _current_branch(path)
+        # 이전 병합이 충돌 상태로 멈춰 있으면 merge 자체가 시작되지 않는다
+        # ("Merging is not possible because you have unmerged files"). 그대로
+        # 진행하면 원인이 안 드러나는 error로 보고되므로 먼저 걸러서 안내한다
+        # (2026-07-28 실측: 재실행할 때마다 같은 실패를 반복해 혼란스러웠다).
+        if _has_unmerged_paths(path):
+            return {
+                "path": str(path),
+                "branch": branch,
+                "status": "conflict",
+                "output": "이전 병합이 충돌 상태로 멈춰 있다 — 해당 디렉터리에서 충돌을"
+                " 해결하거나 `git merge --abort`로 되돌린 뒤 다시 실행할 것",
+            }
+        before_commit = _current_commit(path)
+        if branch == "main":
+            result = _git(["merge", "--ff-only", "origin/main"], cwd=path)
+        else:
+            result = _git(["merge", "origin/main", "--no-edit"], cwd=path)
+    except OSError as exc:
+        # 등록은 `git worktree list`에 남아 있는데 디렉터리가 사라진 worktree
+        # (앱이 제거했거나 사람이 지운 경우 — 이 프로젝트에서 실제로 여러 번 생겼다).
+        # 예전에는 이 하나 때문에 subprocess가 예외를 던져 **나머지 worktree 동기화까지
+        # 통째로 중단**됐다(2026-07-28 실측). 하나가 사라진 게 나머지를 못 맞출 이유는
+        # 없으므로, 이 worktree만 실패로 보고하고 계속 진행한다.
+        return {
+            "path": str(path),
+            "branch": "?",
+            "status": "missing",
+            "output": f"디렉터리에 접근할 수 없음({exc}) — `git worktree prune`으로 등록을 정리할 것",
+        }
 
-    output = (result.stdout + result.stderr).strip()
+    output = _out(result)
     if result.returncode != 0:
-        status = "conflict" if "CONFLICT" in result.stdout else "error"
+        # 문구 매칭이 아니라 인덱스 상태로 판정한다(_has_unmerged_paths 참고).
+        status = "conflict" if _has_unmerged_paths(path) else "error"
     else:
         after_commit = _current_commit(path)
         status = "up_to_date" if after_commit == before_commit else "merged"
@@ -409,6 +481,7 @@ _SYNC_STATUS_LABELS = {
     "merged": "동기화 완료",
     "conflict": "충돌 — 수동 해결 필요",
     "error": "오류",
+    "missing": "디렉터리 없음 — git worktree prune 필요",
 }
 
 
@@ -429,7 +502,9 @@ def cmd_worktree_sync(args: argparse.Namespace) -> int:
     for result in sync_all_worktrees(worktrees):
         label = _SYNC_STATUS_LABELS.get(result["status"], result["status"])
         print(f"{result['path']}  [{result['branch']}]  {label}")
-        if result["status"] in ("conflict", "error"):
+        # missing도 사람이 조치해야 하는 상태다(등록만 남은 worktree → prune 필요).
+        # 다만 나머지 worktree 동기화를 막지는 않는다(sync_worktree_with_main 참고).
+        if result["status"] in ("conflict", "error", "missing"):
             had_problem = True
             print(f"    {result['output']}")
 
