@@ -5,7 +5,7 @@
 - **지금 진행 상황만 빠르게**: `03_진행상황/harness-progress-checklist-ko.md`
 - **완전히 새 환경/새 머신에서 자기완결적으로 이어가기**: `03_진행상황/` 안
   가장 최신 `harness-handoff-summary-vN-ko.md`(번호 최대 = 최신 — push할
-  때마다 새 버전 추가, 옛 버전 정리, 2026-07-28 기준 v17)
+  때마다 새 버전 추가, 옛 버전 정리, 2026-07-28 기준 v18)
 - **진행 규칙**(git 워크플로우, 테스트/리뷰 원칙, 언어 정책 등):
   `00_작업규칙/harness-project-conventions-ko.md`
 
@@ -50,7 +50,7 @@ gaebalai/claude-code-orchestrator, jikime/harness-lab) + 하네스 기본 개념
   내용, 이유(스코프 결정 포함), 의도적으로 안 한 것, 알려진 갭까지 기록.
   "왜 이렇게 했는지" 참고용. Step 종료 시마다 갱신.
 - `harness-handoff-summary-vN-ko.md` — 자기완결적 인수인계 요약. push할 때마다
-  최신 상태로 새 버전 추가(예: v17). **옛 버전은 최신 버전에 전부 흡수 —
+  최신 상태로 새 버전 추가(예: v18). **옛 버전은 최신 버전에 전부 흡수 —
   보관 안 함**(2026-07-24 정리 — v2~v12가 detail 문서와 중복 내용이라 삭제,
   v2를 인용하던 `02_구현플랜/harness-implementation-plan-ko.md`도 함께 갱신).
 
@@ -76,7 +76,8 @@ gaebalai/claude-code-orchestrator, jikime/harness-lab) + 하네스 기본 개념
 (`src/harness/`, `tests/`, `pyproject.toml`, `README.md`).
 
 **구조 결정 기록(ADR)은 코드 옆에 있다** — `../harness-mvp/docs/adr/`
-(`0001`~`0007`). "왜 이 구조인가"를 이 문서 폴더가 아니라 거기서 찾을 것:
+(`0001`~`0008`). "왜 이 구조인가"를 이 문서 폴더가 아니라 거기서 찾을 것:
 0001 팀 패턴 분기, 0002 Safety 릴리스 게이트, 0003 Debate/Consensus 도입 보류,
 0004 Judge를 실제 LLM 판단으로 승격, 0005 공유 엔진 + 독립 도메인 폴더,
-0006 `iterative_refinement`, 0007 `agentic_task`(자율 에이전트를 감싸는 하네스).
+0006 `iterative_refinement`, 0007 `agentic_task`(자율 에이전트를 감싸는 하네스),
+0008 체인 최종 산출물을 마지막 스텝이 아니라 성공한 모든 스텝으로 구성.
