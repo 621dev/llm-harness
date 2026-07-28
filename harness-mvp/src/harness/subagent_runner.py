@@ -80,6 +80,7 @@ def delegate(
     step.output_ref = output_ref
     step.latency_ms = candidate.latency_ms
     step.cost_usd = candidate.cost_usd
+    step.subscription_calls = candidate.subscription_calls
 
     if candidate.status == "error":
         step.status = "error"

@@ -40,16 +40,18 @@ def build_dashboard(*, root: Optional[Path] = None) -> DashboardReport:
         run_dir = root / run_id
         pattern = _read_team_pattern(run_dir)
         status = _derive_run_status(run_dir)
-        latency_ms, cost_usd = _read_metrics(run_dir)
+        latency_ms, cost_usd, subscription_calls = _read_metrics(run_dir)
 
         bucket = buckets.setdefault(
-            pattern, {"success": 0, "warning": 0, "error": 0, "latencies": [], "costs": []}
+            pattern,
+            {"success": 0, "warning": 0, "error": 0, "latencies": [], "costs": [], "sub_calls": []},
         )
         bucket[status] += 1
         if latency_ms is not None:
             bucket["latencies"].append(latency_ms)
         if cost_usd is not None:
             bucket["costs"].append(cost_usd)
+        bucket["sub_calls"].append(subscription_calls)
 
     patterns = [
         PatternStats(
@@ -60,6 +62,7 @@ def build_dashboard(*, root: Optional[Path] = None) -> DashboardReport:
             error_count=bucket["error"],
             avg_latency_ms=_avg(bucket["latencies"]),
             avg_cost_usd=_avg(bucket["costs"]),
+            total_subscription_calls=sum(bucket["sub_calls"]),
         )
         for pattern, bucket in buckets.items()
     ]
@@ -75,11 +78,16 @@ def _read_team_pattern(run_dir: Path) -> str:
     return plan.get("team_pattern", _DIRECT_CALL_PATTERN)
 
 
-def _read_metrics(run_dir: Path) -> tuple[Optional[int], Optional[float]]:
+def _read_metrics(run_dir: Path) -> tuple[Optional[int], Optional[float], int]:
+    """구독 호출 수는 옛 run의 metrics.json에 없는 필드라 0으로 본다(하위 호환)."""
     metrics = _safe_read_json(run_dir, "metrics.json")
     if metrics is None:
-        return None, None
-    return metrics.get("latency_ms"), metrics.get("estimated_cost_usd")
+        return None, None, 0
+    return (
+        metrics.get("latency_ms"),
+        metrics.get("estimated_cost_usd"),
+        metrics.get("subscription_calls") or 0,
+    )
 
 
 def _derive_run_status(run_dir: Path) -> str:
@@ -117,7 +125,7 @@ def _avg(values: list[float]) -> Optional[float]:
 def render_html(report: DashboardReport) -> str:
     """DashboardReport를 외부 CSS/JS/CDN 없는 자기완결형 HTML로 렌더링한다."""
     rows = "\n".join(_render_pattern_row(p) for p in report.patterns) or (
-        '<tr><td colspan="7" class="empty">집계된 run이 없다.</td></tr>'
+        '<tr><td colspan="8" class="empty">집계된 run이 없다.</td></tr>'
     )
     return f"""<!doctype html>
 <html lang="ko">
@@ -144,7 +152,7 @@ def render_html(report: DashboardReport) -> str:
   <thead>
     <tr>
       <th>team_pattern</th><th>총 run</th><th>성공/경고/실패</th><th>비율</th>
-      <th>성공률</th><th>평균 latency(ms)</th><th>평균 cost($)</th>
+      <th>성공률</th><th>평균 latency(ms)</th><th>평균 cost($)</th><th>구독 호출(누적)</th>
     </tr>
   </thead>
   <tbody>
@@ -167,6 +175,7 @@ def _render_pattern_row(p: PatternStats) -> str:
     pattern_name = html_lib.escape(p.team_pattern)
     latency = f"{p.avg_latency_ms:.0f}" if p.avg_latency_ms is not None else "-"
     cost = f"{p.avg_cost_usd:.6f}" if p.avg_cost_usd is not None else "-"
+    sub_calls = p.total_subscription_calls or "-"
     return (
         "    <tr>"
         f"<td>{pattern_name}</td>"
@@ -176,5 +185,6 @@ def _render_pattern_row(p: PatternStats) -> str:
         f"<td>{success_rate}%</td>"
         f"<td>{latency}</td>"
         f"<td>{cost}</td>"
+        f"<td>{sub_calls}</td>"
         "</tr>"
     )

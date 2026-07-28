@@ -58,8 +58,16 @@ def run_agent_task(provider: AgentProvider, prompt: str, run_dir: Path, *, max_t
 
 
 def agent_workspace(run_dir: Path) -> Path:
-    """에이전트가 파일을 쓸 수 있는 유일한 위치."""
-    return run_dir / AGENT_WORKSPACE_DIRNAME
+    """에이전트가 파일을 쓸 수 있는 유일한 위치.
+
+    **경로를 반드시 정규화(resolve)한다.** 안전 경계는 CLI가 cwd 기준 경로 스코프
+    규칙(`Write(./**)`)으로 강제하는데, 에이전트는 도구를 호출할 때 절대경로를
+    쓴다. cwd가 Windows 8.3 단축 경로(`C:\\Users\\GSITM-~1\\...`)나 심볼릭 링크로
+    들어오면 CLI가 정규화한 cwd와 에이전트가 만든 절대경로가 문자열로 안 맞아
+    **정상적인 워크스페이스 안 쓰기까지 거부된다**(2026-07-27 경계 검증
+    스크립트를 만들다 실측: 단축 경로 임시 디렉터리에서 Write가 전부 denied).
+    """
+    return (run_dir / AGENT_WORKSPACE_DIRNAME).resolve()
 
 
 def list_produced_files(workspace: Path) -> list[str]:

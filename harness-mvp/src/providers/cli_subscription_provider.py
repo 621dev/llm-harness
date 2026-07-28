@@ -313,12 +313,16 @@ def _parse_agent_stream(stdout: str) -> Optional[AgentRunResult]:
     if final is None:
         return None
 
+    num_turns = final.get("num_turns")
     return AgentRunResult(
         turns=turns,
         final_text=final.get("result") or "",
         produced_files=[],  # 실행 후 워크스페이스 스캔으로 agent_runner가 채운다
         blocked_tool_uses=_parse_denials(final.get("permission_denials")),
-        num_turns=final.get("num_turns"),
+        num_turns=num_turns,
+        # 에이전트는 턴마다 모델을 부르므로 턴 수가 곧 구독 호출 수다. CLI가 num_turns를
+        # 안 주면 우리가 파싱한 assistant 메시지 수로 대체한다(과소 집계 방지).
+        subscription_calls=num_turns if isinstance(num_turns, int) else len(turns),
         cost_usd=None,  # 구독 모드는 $ 집계 대상이 아니다 (schemas.py Candidate와 동일 규칙)
         stop_reason=_stop_reason(final),
     )

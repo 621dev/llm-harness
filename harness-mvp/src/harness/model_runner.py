@@ -63,9 +63,17 @@ def generate_with_retry(provider: Provider, prompt: str, *, temperature: float =
     금지"는 패턴과 무관한 공통 계약이기 때문이다.
     """
     last_error: Exception | None = None
+    attempts = 0
     for _attempt in range(MAX_RETRIES + 1):
+        attempts += 1
         try:
-            return provider.generate(prompt, temperature=temperature)
+            candidate = provider.generate(prompt, temperature=temperature)
+            # 구독 호출은 cost_usd가 None이라 비용 지표에 안 잡히므로 횟수로 남긴다
+            # (Section 9 Cost Blindness 방지). 실패한 시도도 한도를 소모하니 attempts를
+            # 그대로 쓴다 — 여기가 모든 generate() 호출이 지나는 유일한 지점이라
+            # 재시도까지 정확히 셀 수 있는 자리다.
+            candidate.subscription_calls = attempts if _is_subscription(provider) else 0
+            return candidate
         except Exception as exc:  # noqa: BLE001 - provider 구현체마다 예외 타입이 다를 수 있음
             last_error = exc
 
@@ -76,7 +84,14 @@ def generate_with_retry(provider: Provider, prompt: str, *, temperature: float =
         latency_ms=None,
         cost_usd=None,
         status="error",
+        # 끝내 실패했어도 시도한 만큼 구독 한도는 이미 소모됐다.
+        subscription_calls=attempts if _is_subscription(provider) else 0,
     )
+
+
+def _is_subscription(provider: Provider) -> bool:
+    """auth_mode를 못 읽는 provider 대역(테스트 fake 등)은 구독이 아닌 것으로 본다."""
+    return getattr(provider, "auth_mode", None) == "cli_subscription"
 
 
 def _render_candidate_markdown(candidate: Candidate) -> str:

@@ -38,6 +38,15 @@ class Provider(ABC):
     def model_id(self) -> str:
         return self.config.model_id
 
+    @property
+    def auth_mode(self) -> str:
+        """api_key(종량제) / cli_subscription(구독 한도 소모).
+
+        구독 호출은 cost_usd가 None이라 비용 지표에 안 잡히므로, 대신 호출 횟수를
+        세려면 호출부(model_runner)가 이 값을 봐야 한다(Section 9 Cost Blindness 방지).
+        """
+        return self.config.auth_mode
+
     @abstractmethod
     def generate(self, prompt: str, *, temperature: float = 0.7) -> Candidate:
         """prompt에 대한 후보 응답을 생성해서 Candidate로 반환한다.

@@ -76,6 +76,7 @@ def evaluate(candidates: list[Candidate], rubric: list[str], judge_provider: Pro
         winner=winner.candidate,
         latency_ms=judge_candidate.latency_ms,
         cost_usd=judge_candidate.cost_usd,
+        subscription_calls=judge_candidate.subscription_calls,
     )
 
 
@@ -100,6 +101,7 @@ def check_pass(content: str, rubric: list[str], judge_provider: Provider) -> Ref
         feedback=parsed["feedback"],
         latency_ms=judge_candidate.latency_ms,
         cost_usd=judge_candidate.cost_usd,
+        subscription_calls=judge_candidate.subscription_calls,
     )
 
 

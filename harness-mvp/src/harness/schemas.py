@@ -52,6 +52,7 @@ class DelegationStep(BaseModel):
     input_ref: Optional[str] = None
     output_ref: Optional[str] = None
     status: StepStatus = "success"
+    subscription_calls: int = 0  # 이 스텝이 소모한 구독 호출 수 (Candidate와 같은 의미)
     # 컨텍스트 격리는 "전체 텍스트를 오케스트레이터 컨텍스트에 노출하지 않는다"는 것이지
     # 작은 숫자 지표까지 숨기는 게 아니다. latency/cost는 metrics.json 집계(Cost Blindness
     # 방지, Section 9)를 위해 여기 남겨둔다.
@@ -88,6 +89,11 @@ class Candidate(BaseModel):
     latency_ms: Optional[int] = None
     cost_usd: Optional[float] = None  # auth_mode="api_key" 일 때만 채움
     status: StepStatus = "success"
+    # auth_mode="cli_subscription" provider를 실제로 호출한 횟수(재시도 포함).
+    # 구독 호출은 cost_usd가 None이라 비용 지표에 전혀 안 잡히는데, 실제로는 5시간/주간
+    # 롤링 한도를 소모하는 실비용이다 — 금액 대신 횟수로라도 보이게 한다
+    # (Section 9 Cost Blindness 방지). api_key provider면 0. model_runner가 채운다.
+    subscription_calls: int = 0
 
 
 class JudgingScore(BaseModel):
@@ -110,6 +116,7 @@ class Judging(BaseModel):
     winner: str
     latency_ms: Optional[int] = None
     cost_usd: Optional[float] = None
+    subscription_calls: int = 0  # judge 호출이 구독 provider였다면 그 횟수
 
 
 class RefinementVerdict(BaseModel):
@@ -124,6 +131,7 @@ class RefinementVerdict(BaseModel):
     feedback: str
     latency_ms: Optional[int] = None
     cost_usd: Optional[float] = None
+    subscription_calls: int = 0  # evaluator 호출이 구독 provider였다면 그 횟수
 
 
 class RefinementRound(BaseModel):
@@ -138,6 +146,7 @@ class RefinementRound(BaseModel):
     feedback: str
     latency_ms: Optional[int] = None
     cost_usd: Optional[float] = None
+    subscription_calls: int = 0  # 이 라운드의 generator+evaluator 구독 호출 합산
 
 
 class AgentToolUse(BaseModel):
@@ -183,6 +192,9 @@ class AgentRunResult(BaseModel):
     num_turns: Optional[int] = None
     latency_ms: Optional[int] = None
     cost_usd: Optional[float] = None  # auth_mode="cli_subscription"이면 None (구독 사용량은 $ 집계 밖)
+    # 에이전트는 턴마다 모델을 부르므로 run 하나가 곧 여러 번의 구독 호출이다 —
+    # 이 패턴이 다른 패턴보다 구독 한도를 많이 쓴다는 게 지표로 보여야 한다.
+    subscription_calls: int = 0
     stop_reason: Literal["completed", "max_turns", "error"] = "completed"
 
 
@@ -193,6 +205,10 @@ class RunMetrics(BaseModel):
     completed_candidates_or_steps: int
     failed_candidates_or_steps: int
     estimated_cost_usd: Optional[float] = None  # auth_mode="api_key" 일 때만
+    # 구독(cli_subscription) provider 호출 횟수. estimated_cost_usd가 $0으로 보이는
+    # run도 실제로는 구독 한도를 소모했을 수 있어서, 그 몫을 횟수로 남긴다
+    # (Section 9 Cost Blindness 방지 — 금액과 한도는 다른 자원이다).
+    subscription_calls: int = 0
 
 
 class Observation(BaseModel):
@@ -325,6 +341,9 @@ class PatternStats(BaseModel):
     error_count: int
     avg_latency_ms: Optional[float] = None
     avg_cost_usd: Optional[float] = None
+    # 평균이 아니라 누적 합계다 — 구독 한도는 "run당 평균"보다 "이 패턴이 지금까지
+    # 얼마나 썼는가"가 실제로 관리해야 할 값이기 때문(cost와 성격이 다르다).
+    total_subscription_calls: int = 0
 
 
 class DashboardReport(BaseModel):

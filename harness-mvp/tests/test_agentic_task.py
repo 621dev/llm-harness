@@ -288,6 +288,17 @@ class ListProducedFilesTest(unittest.TestCase):
 
         self.assertEqual(agent_runner.list_produced_files(self.workspace), ["real.md"])
 
+    def test_workspace_path_is_resolved(self) -> None:
+        """회귀 테스트(2026-07-27 경계 검증 중 실측): 워크스페이스 경로가 Windows
+        8.3 단축 경로나 심볼릭 링크로 들어오면, CLI가 정규화한 cwd와 에이전트가
+        만든 절대경로가 문자열로 안 맞아 **정상적인 안쪽 쓰기까지 거부된다**.
+        경계가 뚫리는 게 아니라 반대로 과차단되는 실패라 눈치채기 어렵다."""
+        run_dir = self.workspace / "run"
+
+        resolved = agent_runner.agent_workspace(run_dir)
+
+        self.assertEqual(resolved, resolved.resolve())
+
     def test_missing_workspace_returns_empty(self) -> None:
         self.assertEqual(agent_runner.list_produced_files(self.workspace / "does-not-exist"), [])
 

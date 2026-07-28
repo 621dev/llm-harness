@@ -305,6 +305,7 @@ def _run_direct_call(task: TaskInput, providers: dict[str, Provider], run_dir: P
         errors=errors,
         latency_ms=candidate.latency_ms,
         cost_usd=candidate.cost_usd,
+        subscription_calls=candidate.subscription_calls,
         completed=1 if candidate.status == "success" else 0,
         failed=0 if candidate.status == "success" else 1,
         stage="direct_call",
@@ -336,6 +337,7 @@ def _run_fan_out_judge(task: TaskInput, plan: Plan, providers: dict[str, Provide
     completed, failed = len(successful), len(candidates) - len(successful)
     latency_ms = _sum_optional_int(c.latency_ms for c in candidates)
     cost_usd = _sum_optional_float(c.cost_usd for c in candidates)
+    subscription_calls = sum(c.subscription_calls for c in candidates)
 
     if len(successful) < MIN_CANDIDATES:
         errors.append(
@@ -345,7 +347,8 @@ def _run_fan_out_judge(task: TaskInput, plan: Plan, providers: dict[str, Provide
             }
         )
         return _finalize_without_output(
-            run_dir, errors=errors, latency_ms=latency_ms, cost_usd=cost_usd, completed=completed, failed=failed
+            run_dir, errors=errors, latency_ms=latency_ms, cost_usd=cost_usd,
+            subscription_calls=subscription_calls, completed=completed, failed=failed
         )
 
     try:
@@ -353,7 +356,8 @@ def _run_fan_out_judge(task: TaskInput, plan: Plan, providers: dict[str, Provide
     except judge.JudgeError as exc:
         errors.append({"stage": "judge", "message": str(exc)})
         return _finalize_without_output(
-            run_dir, errors=errors, latency_ms=latency_ms, cost_usd=cost_usd, completed=completed, failed=failed
+            run_dir, errors=errors, latency_ms=latency_ms, cost_usd=cost_usd,
+            subscription_calls=subscription_calls, completed=completed, failed=failed
         )
 
     run_store.write_json(run_dir, "judging.json", judging.model_dump(mode="json"))
@@ -364,6 +368,7 @@ def _run_fan_out_judge(task: TaskInput, plan: Plan, providers: dict[str, Provide
 
     return _finalize(
         run_dir, final_content, errors=errors, latency_ms=total_latency_ms, cost_usd=total_cost_usd,
+        subscription_calls=subscription_calls + judging.subscription_calls,
         completed=completed, failed=failed, stage="fan_out_judge",
     )
 
@@ -379,15 +384,18 @@ def _run_hierarchical_delegation(
     failed = sum(1 for step in executed_steps if step.status == "error")
     latency_ms = _sum_optional_int(step.latency_ms for step in executed_steps)
     cost_usd = _sum_optional_float(step.cost_usd for step in executed_steps)
+    subscription_calls = sum(step.subscription_calls for step in executed_steps)
 
     if not chain_completed:
         return _finalize_partial_chain(
-            run_dir, executed_steps, latency_ms=latency_ms, cost_usd=cost_usd, completed=completed, failed=failed
+            run_dir, executed_steps, latency_ms=latency_ms, cost_usd=cost_usd,
+            subscription_calls=subscription_calls, completed=completed, failed=failed
         )
 
     final_content = run_store.read_markdown(run_dir, executed_steps[-1].output_ref)
     return _finalize(
-        run_dir, final_content, errors=[], latency_ms=latency_ms, cost_usd=cost_usd, completed=completed,
+        run_dir, final_content, errors=[], latency_ms=latency_ms, cost_usd=cost_usd,
+        subscription_calls=subscription_calls, completed=completed,
         failed=failed, stage="hierarchical_delegation",
     )
 
@@ -423,6 +431,7 @@ def _run_iterative_refinement(
     cost_parts: list[Optional[float]] = []
     last_content: Optional[str] = None
     generated_count = 0
+    subscription_calls = 0
     generation_failed = False
     passed = False
     prompt = task.prompt
@@ -431,6 +440,7 @@ def _run_iterative_refinement(
         candidate = model_runner.generate_with_retry(generator, prompt)
         latency_parts.append(candidate.latency_ms)
         cost_parts.append(candidate.cost_usd)
+        subscription_calls += candidate.subscription_calls
 
         if candidate.status == "error":
             generation_failed = True
@@ -451,6 +461,7 @@ def _run_iterative_refinement(
             break
         latency_parts.append(verdict.latency_ms)
         cost_parts.append(verdict.cost_usd)
+        subscription_calls += verdict.subscription_calls
 
         rounds.append(
             RefinementRound(
@@ -460,6 +471,7 @@ def _run_iterative_refinement(
                 feedback=verdict.feedback,
                 latency_ms=_sum_optional_int([candidate.latency_ms, verdict.latency_ms]),
                 cost_usd=_sum_optional_float([candidate.cost_usd, verdict.cost_usd]),
+                subscription_calls=candidate.subscription_calls + verdict.subscription_calls,
             )
         )
 
@@ -476,12 +488,14 @@ def _run_iterative_refinement(
 
     if last_content is None:
         return _finalize_without_output(
-            run_dir, errors=errors, latency_ms=latency_ms, cost_usd=cost_usd, completed=0, failed=failed
+            run_dir, errors=errors, latency_ms=latency_ms, cost_usd=cost_usd,
+            subscription_calls=subscription_calls, completed=0, failed=failed
         )
 
     if passed:
         return _finalize(
             run_dir, last_content, errors=errors, latency_ms=latency_ms, cost_usd=cost_usd,
+            subscription_calls=subscription_calls,
             completed=generated_count, failed=failed, stage="iterative_refinement",
             success_summary=f"iterative_refinement run 완료 — {len(rounds)}라운드 만에 rubric 통과",
         )
@@ -495,6 +509,7 @@ def _run_iterative_refinement(
         )
     return _finalize(
         run_dir, last_content, errors=errors, latency_ms=latency_ms, cost_usd=cost_usd,
+        subscription_calls=subscription_calls,
         completed=generated_count, failed=failed, stage="iterative_refinement_partial",
         content_prefix="(partial) ",
         success_summary=(
@@ -564,7 +579,8 @@ def _run_agentic_task(task: TaskInput, providers: dict[str, Provider], run_dir: 
         # 남긴 것도 없고 정상 종료도 아니면 승격할 결과 자체가 없다
         # (체인이 첫 단계부터 실패한 경우와 같은 처리).
         return _finalize_without_output(
-            run_dir, errors=errors, latency_ms=result.latency_ms, cost_usd=result.cost_usd, completed=0, failed=1
+            run_dir, errors=errors, latency_ms=result.latency_ms, cost_usd=result.cost_usd,
+            subscription_calls=result.subscription_calls, completed=0, failed=1
         )
 
     workspace = agent_runner.agent_workspace(run_dir)
@@ -579,6 +595,7 @@ def _run_agentic_task(task: TaskInput, providers: dict[str, Provider], run_dir: 
         errors=errors,
         latency_ms=result.latency_ms,
         cost_usd=result.cost_usd,
+        subscription_calls=result.subscription_calls,
         completed=len(result.produced_files),
         failed=1 if is_partial else 0,
         stage="agentic_task_partial" if is_partial else "agentic_task",
@@ -644,6 +661,7 @@ def _finalize_partial_chain(
     *,
     latency_ms: Optional[int],
     cost_usd: Optional[float],
+    subscription_calls: int = 0,
     completed: int,
     failed: int,
 ) -> Observation:
@@ -673,6 +691,7 @@ def _finalize_partial_chain(
                 completed_candidates_or_steps=completed,
                 failed_candidates_or_steps=failed,
                 estimated_cost_usd=cost_usd,
+                subscription_calls=subscription_calls,
             ).model_dump(mode="json"),
         )
         run_store.write_json(run_dir, "errors.json", errors)
@@ -686,6 +705,7 @@ def _finalize_partial_chain(
     partial_content = run_store.read_markdown(run_dir, last_success.output_ref)
     return _finalize(
         run_dir, partial_content, errors=errors, latency_ms=latency_ms, cost_usd=cost_usd,
+        subscription_calls=subscription_calls,
         completed=completed, failed=failed, stage="hierarchical_delegation_partial",
         content_prefix="(partial) ",
         success_summary=(
@@ -701,6 +721,7 @@ def _finalize_without_output(
     errors: list[dict[str, str]],
     latency_ms: Optional[int],
     cost_usd: Optional[float],
+    subscription_calls: int = 0,
     completed: int,
     failed: int,
 ) -> Observation:
@@ -714,6 +735,7 @@ def _finalize_without_output(
             completed_candidates_or_steps=completed,
             failed_candidates_or_steps=failed,
             estimated_cost_usd=cost_usd,
+            subscription_calls=subscription_calls,
         ).model_dump(mode="json"),
     )
     reason = errors[-1]["message"] if errors else "알 수 없는 이유로 출력이 생성되지 않음"
@@ -727,6 +749,7 @@ def _finalize(
     errors: list[dict[str, str]],
     latency_ms: Optional[int],
     cost_usd: Optional[float],
+    subscription_calls: int = 0,
     completed: int,
     failed: int,
     stage: str,
@@ -760,6 +783,7 @@ def _finalize(
         completed_candidates_or_steps=completed,
         failed_candidates_or_steps=failed,
         estimated_cost_usd=cost_usd,
+        subscription_calls=subscription_calls,
     )
     run_store.write_json(run_dir, "metrics.json", metrics.model_dump(mode="json"))
 
