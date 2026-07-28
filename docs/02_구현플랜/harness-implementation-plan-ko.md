@@ -104,7 +104,9 @@ _workspace/
 - `DelegationStep`: role(예: "research", "design_review"), provider_id, input_ref, output_ref, status
 - `ProviderConfig`: provider_id, `auth_mode: Literal["api_key", "cli_subscription"]`, model_id
 - `Candidate`: model_id, content, tokens, latency_ms, cost_usd(auth_mode="api_key"일 때만 채움), status(success/error)
-- `Judging`: scores(candidate, score, strengths, weaknesses), recommended_strategy, winner
+- `Judging`: scores(candidate, score, weaknesses), recommended_strategy, winner
+  (strengths는 없다 — ADR 0004의 reject-first 원칙상 judge는 결함만 찾는다.
+  늘 빈 배열이던 필드라 2026-07-28 정기적 정리에서 제거)
 - `RefinementVerdict`/`RefinementRound` (iterative_refinement 전용, ADR 0006):
   verdict는 `judge.check_pass()`의 합격 판정(passed, feedback), round는 라운드 하나의
   기록(round_index, content, passed, feedback, latency_ms, cost_usd — `refinement.json`에

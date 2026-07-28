@@ -63,7 +63,6 @@ def evaluate(candidates: list[Candidate], rubric: list[str], judge_provider: Pro
         JudgingScore(
             candidate=candidate.model_id,
             score=parsed[label]["score"] / 100.0,
-            strengths=[],
             weaknesses=parsed[label]["flaws"],
         )
         for label, candidate in labels.items()

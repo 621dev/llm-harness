@@ -97,9 +97,17 @@ class Candidate(BaseModel):
 
 
 class JudgingScore(BaseModel):
+    """후보 하나에 대한 judge 판정.
+
+    `weaknesses`만 있고 strengths가 없는 건 의도적이다 — ADR 0004의 reject-first
+    원칙상 judge는 "결함을 근거와 함께 찾는" 일만 한다("문제 없음"을 기본값으로
+    주지 않기 위해). ADR 0004는 `strengths` 재활용 여부를 구현 단계 판단으로
+    열어뒀고, 구현은 weaknesses만 쓰기로 정했다 — 늘 빈 배열이던 strengths
+    필드는 2026-07-28 정기적 정리에서 제거했다.
+    """
+
     candidate: str
     score: float
-    strengths: list[str] = Field(default_factory=list)
     weaknesses: list[str] = Field(default_factory=list)
 
 
