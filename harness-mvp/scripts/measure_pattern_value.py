@@ -6,17 +6,24 @@
 rubric 합격 판정(judge.check_pass, ADR 0006에서 추가)으로 품질을 비교한다.
 
 설계 결정:
-- 모델을 전 조건 gemini로 고정한다 — "체인 구조 자체"의 효과만 분리하기
-  위해서다(역할별 모델 특화 효과는 별도 변수라 이 측정에서 통제). 부수 효과로
-  구독 CLI 한도를 소모하지 않고 모든 비용이 $로 집계된다.
+- **두 조건의 모델을 같게 고정한다** — "체인 구조 자체"의 효과만 분리하기
+  위해서다(역할별 모델 특화 효과는 별도 변수라 이 측정에서 통제).
+  `--generator`/`--evaluator`로 백엔드를 고를 수 있다:
+  - `gemini`(기본): 종량제라 비용이 $로 집계된다. 다만 free tier는 일 20회
+    한도라 k를 키우기 어렵고, 한도를 쓰면 다음 날까지 막힌다.
+  - `claude`/`codex`: 구독이라 $ 비용은 안 잡히는 대신 **구독 한도를 소모**한다.
+    금액 축이 사라지지만 `subscription_calls`(호출 횟수)로 비교는 된다.
+    Gemini 한도에 막혔을 때 쓰는 우회로.
 - 품질 판정은 두 조건 산출물에 같은 evaluator를 blind로 적용한다(evaluator는
   어느 조건의 출력인지 모른다). 판정이 이분법(pass/fail)이라 미세한 품질 차이는
   feedback 텍스트로만 관찰된다 — 한계로 명시.
 - 실제 Gemini API를 호출하므로 의도적으로 `pytest tests/` 밖에 둔다(작업 규칙:
   자동 테스트는 실제 API/CLI 미호출. `verify_judge_fault_injection.py` 선례).
 
-사용법 (harness-mvp 디렉토리에서, GEMINI_API_KEY 필요):
+사용법 (harness-mvp 디렉토리에서):
   PYTHONPATH=src python scripts/measure_pattern_value.py [--k 3]
+  PYTHONPATH=src python scripts/measure_pattern_value.py --generator claude --evaluator codex
+gemini를 쓰면 GEMINI_API_KEY, claude/codex를 쓰면 해당 CLI 로그인이 필요하다.
 
 결과는 콘솔 표 + `_workspace/measurements/pattern_value_<UTC시각>.json`.
 """
@@ -37,6 +44,8 @@ sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="repla
 from harness import judge, model_runner, orchestrator, run_store  # noqa: E402
 from harness.schemas import ProviderConfig, TaskInput  # noqa: E402
 from providers.api_provider import GeminiApiProvider  # noqa: E402
+from providers.base import Provider, ProviderError  # noqa: E402
+from providers.cli_subscription_provider import ClaudeCliProvider, CodexCliProvider  # noqa: E402
 
 # Gemini free tier는 짧은 롤링 윈도우 요청 한도(실측 2026-07-27: limit 20,
 # "retry in ~20s")가 있다 — 첫 측정 시도가 무간격 연속 호출로 429를 맞아 전멸했다.
@@ -44,6 +53,10 @@ from providers.api_provider import GeminiApiProvider  # noqa: E402
 # (즉시 1회 재시도)는 속도 제한에는 무력하다(즉시 재시도는 반드시 다시 429) —
 # 백오프 재시도는 별도 검토 대상.
 PACE_SECONDS = 25
+
+# 구독 CLI(claude/codex)는 Gemini free tier 같은 짧은 윈도우 속도 제한이 없어서
+# pacing이 불필요하다 — 그대로 25초씩 쉬면 측정만 몇 배 느려진다.
+SUBSCRIPTION_PACE_SECONDS = 0
 
 # domains/server-engineering-learning의 실제 task(task.networking-basics.json)와
 # 동일한 프롬프트 — 생태적 타당성(실사용 프롬프트로 측정) 확보 목적.
@@ -56,16 +69,125 @@ PROMPT = (
 RUBRIC = ["출처 신뢰성", "핵심 정보 커버리지"]
 
 
-def _gemini(provider_id: str) -> GeminiApiProvider:
-    return GeminiApiProvider(
-        ProviderConfig(provider_id=provider_id, model_id="gemini-2.5-flash", auth_mode="api_key")
-    )
+# 쓸 수 있는 백엔드. gemini는 종량제(비용이 $로 보임), claude/codex는 구독
+# (cost_usd가 None이라 금액 대신 subscription_calls 횟수로 보인다).
+_BACKENDS: dict[str, tuple[str, str]] = {
+    "gemini": ("gemini-2.5-flash", "api_key"),
+    "claude": ("claude-cli", "cli_subscription"),
+    "codex": ("codex-cli", "cli_subscription"),
+}
+
+# 실행 중에 정해진다(main에서 --generator/--evaluator로 설정).
+_GENERATOR_BACKEND = "gemini"
+_EVALUATOR_BACKEND = "gemini"
+
+
+def _make(backend: str, provider_id: str) -> Provider:
+    """백엔드 이름으로 provider 하나를 만든다(대체 없음)."""
+    model_id, auth_mode = _BACKENDS[backend]
+    config = ProviderConfig(provider_id=provider_id, model_id=model_id, auth_mode=auth_mode)
+    if backend == "gemini":
+        return GeminiApiProvider(config)
+    if backend == "claude":
+        return ClaudeCliProvider(config)
+    return CodexCliProvider(config)
+
+
+class _FallbackProvider(Provider):
+    """primary가 응답 못 하면 fallback으로 넘어간다 (gemini 한도 소진 대비).
+
+    **주의**: 측정 도중에 백엔드가 바뀌면 두 조건이 서로 다른 모델로 돌아가
+    "구조 효과"와 "모델 효과"가 뒤섞인다 — 이 스크립트 설계의 전제(모델 고정)가
+    깨진다. 그래서 대체가 일어나면 `used_fallback`을 남기고 **main이 측정을 즉시
+    중단한다** — 경고만 붙여 저장하면 나중에 그 숫자가 그대로 인용될 위험이 있다.
+
+    정상 경로는 시작 전 프로브로 백엔드를 하나 정하는 것이고(`_resolve_backend`),
+    이 wrapper는 "한 번은 답했는데 곧바로 한도가 끊긴" 경계 상황을 감지하는
+    장치다(2026-07-28 실측: 프로브는 통과했는데 바로 다음 호출부터 429).
+    """
+
+    def __init__(self, primary: Provider, fallback: Provider) -> None:
+        super().__init__(primary.config)
+        self._primary = primary
+        self._fallback = fallback
+        self._last_used = primary
+        self.used_fallback = False
+
+    @property
+    def auth_mode(self) -> str:
+        # 실제로 답한 쪽의 인증 모드를 돌려줘야 model_runner의 구독 호출 집계가 맞는다.
+        return self._last_used.auth_mode
+
+    def generate(self, prompt: str, *, temperature: float = 0.7):
+        try:
+            candidate = self._primary.generate(prompt, temperature=temperature)
+            self._last_used = self._primary
+            return candidate
+        except ProviderError as exc:
+            self._last_used = self._fallback
+            self.used_fallback = True
+            print(f"  [fallback] {self._primary.model_id} 응답 실패 → "
+                  f"{self._fallback.model_id}로 대체: {str(exc)[:90]}")
+            return self._fallback.generate(prompt, temperature=temperature)
+
+
+# 실행 중 대체가 일어났는지 확인하려고 만들어진 wrapper를 모아둔다.
+_FALLBACK_WRAPPERS: list[_FallbackProvider] = []
+
+
+def _with_safety_net(backend: str, provider_id: str) -> Provider:
+    """gemini로 확정된 경우에만 claude 안전망을 씌운다 — 측정 도중 한도가
+    소진돼도 run 전체가 날아가지 않게. 대체가 일어나면 결과에 경고가 붙는다."""
+    primary = _make(backend, provider_id)
+    if backend != "gemini":
+        return primary
+    wrapper = _FallbackProvider(primary, _make("claude", provider_id))
+    _FALLBACK_WRAPPERS.append(wrapper)
+    return wrapper
+
+
+def _generator(provider_id: str) -> Provider:
+    return _with_safety_net(_GENERATOR_BACKEND, provider_id)
+
+
+def _evaluator(provider_id: str) -> Provider:
+    return _with_safety_net(_EVALUATOR_BACKEND, provider_id)
+
+
+def _probe_gemini() -> bool:
+    """gemini가 지금 응답하는지 1회 호출로 확인한다(한도 소진 여부 판정)."""
+    try:
+        _make("gemini", "probe").generate("1+1은? 숫자만 답해", temperature=0.0)
+        return True
+    except ProviderError as exc:
+        print(f"  gemini 응답 없음 → claude로 대체한다: {str(exc)[:110]}")
+        return False
+
+
+def _resolve_backend(requested: str) -> str:
+    """`auto`면 gemini를 먼저 확인하고, 안 되면 claude로 정한다.
+
+    호출마다 갈아타는 게 아니라 **측정 시작 전에 한 번 정해서 끝까지 고정**한다 —
+    조건마다 모델이 달라지면 비교가 성립하지 않기 때문이다.
+    """
+    if requested != "auto":
+        return requested
+    return "gemini" if _probe_gemini() else "claude"
+
+
+def _uses_subscription() -> bool:
+    return any(_BACKENDS[b][1] == "cli_subscription" for b in (_GENERATOR_BACKEND, _EVALUATOR_BACKEND))
+
+
+def _pace_seconds() -> int:
+    """gemini(종량제 free tier)만 속도 제한 회피용 간격이 필요하다."""
+    return SUBSCRIPTION_PACE_SECONDS if _uses_subscription() else PACE_SECONDS
 
 
 def run_direct(attempt: int) -> dict:
     """조건 A: 단일 gemini 호출 1회 (적합성 게이트 탈락 시의 direct_call과 동일 경로)."""
     started = time.time()
-    candidate = model_runner.direct_call(PROMPT, _gemini("direct"))
+    candidate = model_runner.direct_call(PROMPT, _generator("direct"))
     elapsed_ms = int((time.time() - started) * 1000)
     return {
         "condition": "direct",
@@ -74,6 +196,7 @@ def run_direct(attempt: int) -> dict:
         "content": candidate.content,
         "latency_ms": candidate.latency_ms if candidate.latency_ms is not None else elapsed_ms,
         "cost_usd": candidate.cost_usd,
+        "subscription_calls": candidate.subscription_calls,
         "llm_calls": 1,
     }
 
@@ -81,10 +204,10 @@ def run_direct(attempt: int) -> dict:
 def run_chain(attempt: int, root: Path) -> dict:
     """조건 B: orchestrator를 통해 research→design_review 체인 실행 (역할 전부 gemini)."""
     providers = {
-        "research-mock": _gemini("research-mock"),
-        "design_review-mock": _gemini("design_review-mock"),
-        "implementation_review-mock": _gemini("implementation_review-mock"),
-        orchestrator.JUDGE_PROVIDER_KEY: _gemini("judge"),
+        "research-mock": _generator("research-mock"),
+        "design_review-mock": _generator("design_review-mock"),
+        "implementation_review-mock": _generator("implementation_review-mock"),
+        orchestrator.JUDGE_PROVIDER_KEY: _evaluator("judge"),
     }
     task = TaskInput(task_id=f"measure-chain-{attempt}", prompt=PROMPT)
     observation = orchestrator.run(task, providers, root=root)
@@ -99,6 +222,7 @@ def run_chain(attempt: int, root: Path) -> dict:
         "content": content,
         "latency_ms": metrics["latency_ms"],
         "cost_usd": metrics["estimated_cost_usd"],
+        "subscription_calls": metrics.get("subscription_calls", 0),
         "llm_calls": 2,
     }
 
@@ -108,7 +232,7 @@ def evaluate(result: dict) -> dict:
     if not result["ok"]:
         result.update({"passed": False, "feedback": "(실행 실패 — 판정 생략)", "eval_cost_usd": None})
         return result
-    verdict = judge.check_pass(result["content"], RUBRIC, _gemini("evaluator"))
+    verdict = judge.check_pass(result["content"], RUBRIC, _evaluator("evaluator"))
     result.update(
         {"passed": verdict.passed, "feedback": verdict.feedback, "eval_cost_usd": verdict.cost_usd}
     )
@@ -126,6 +250,7 @@ def summarize(results: list[dict], condition: str) -> dict:
         "pass_rate": round(len(passed) / len(rows), 2) if rows else None,
         "avg_latency_ms": int(sum(latencies) / len(latencies)) if latencies else None,
         "avg_run_cost_usd": round(sum(costs) / len(costs), 6) if costs else None,
+        "total_subscription_calls": sum(r.get("subscription_calls", 0) for r in rows),
         "llm_calls_per_attempt": rows[0]["llm_calls"] if rows else None,
     }
 
@@ -133,7 +258,29 @@ def summarize(results: list[dict], condition: str) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description="단일 호출 vs 체인 품질/비용 측정")
     parser.add_argument("--k", type=int, default=3, help="조건당 반복 횟수 (기본 3)")
+    parser.add_argument(
+        "--generator", default="auto", choices=sorted(_BACKENDS) + ["auto"],
+        help="후보/체인 스텝을 생성할 백엔드 (기본 auto: gemini 확인 후 안 되면 claude)",
+    )
+    parser.add_argument(
+        "--evaluator", default="auto", choices=sorted(_BACKENDS) + ["auto"],
+        help="합격 판정에 쓸 백엔드 (기본 auto). 생성 모델과 다르게 두면 self-preference 완화",
+    )
     args = parser.parse_args()
+
+    global _GENERATOR_BACKEND, _EVALUATOR_BACKEND
+    # auto면 시작 전에 gemini를 한 번 확인해서 백엔드를 정한다 — 호출마다 갈아타면
+    # 조건별 모델이 달라져 비교가 성립하지 않는다(_resolve_backend 참고).
+    if "auto" in (args.generator, args.evaluator):
+        print("백엔드 자동 선택: gemini 응답 확인 중...")
+    resolved = _resolve_backend("auto") if "auto" in (args.generator, args.evaluator) else None
+    _GENERATOR_BACKEND = resolved if args.generator == "auto" else args.generator
+    _EVALUATOR_BACKEND = resolved if args.evaluator == "auto" else args.evaluator
+    pace = _pace_seconds()
+    print(f"generator={_GENERATOR_BACKEND} / evaluator={_EVALUATOR_BACKEND} / 호출 간격 {pace}초")
+    if _uses_subscription():
+        print("주의: 구독(claude/codex) 호출이라 $ 비용 대신 구독 한도를 소모한다.")
+    print()
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     measure_root = Path("_workspace/measurements")
@@ -145,12 +292,29 @@ def main() -> None:
     for i in range(1, args.k + 1):
         for label, runner in (("direct", lambda: run_direct(i)), ("chain", lambda: run_chain(i, chain_runs_root))):
             if not first:
-                time.sleep(PACE_SECONDS)  # free tier 롤링 윈도우 한도 회피 (위 주석)
+                time.sleep(pace)  # free tier 롤링 윈도우 한도 회피 (위 주석)
             first = False
             print(f"[{i}/{args.k}] {label} 실행 중...")
             result = runner()
-            time.sleep(PACE_SECONDS)
+            time.sleep(pace)
             results.append(evaluate(result))
+
+            # 측정 도중 백엔드가 바뀌면 조건마다 다른 모델로 돌아가 "구조 효과"와
+            # "모델 효과"가 섞인다 — 그런 데이터는 비교에 쓸 수 없으므로 **더 돌리지
+            # 않고 즉시 중단**한다. 경고만 붙여 저장하면 나중에 누군가 그 숫자를
+            # 그대로 인용할 위험이 있다(2026-07-28 실제로 그런 run이 하나 나옴).
+            if any(w.used_fallback for w in _FALLBACK_WRAPPERS):
+                print(
+                    f"\n[중단] gemini가 측정 도중 응답하지 못해 claude로 대체됐다"
+                    f" (진행 {len(results)}/{args.k * 2}회).\n"
+                    "        조건마다 모델이 달라져 비교가 성립하지 않으므로 결과를"
+                    " 저장하지 않고 멈춘다.\n"
+                    "        한 모델로 고정해 다시 돌릴 것:\n"
+                    "          PYTHONPATH=src python scripts/measure_pattern_value.py"
+                    " --generator claude --evaluator claude\n"
+                    "        (또는 gemini 한도가 회복된 뒤 --generator gemini --evaluator gemini)"
+                )
+                raise SystemExit(1)
 
     summaries = [summarize(results, "direct"), summarize(results, "chain")]
 
@@ -159,6 +323,7 @@ def main() -> None:
         print(
             f"- {s['condition']}: 합격률 {s['pass_rate']}, 평균 지연 {s['avg_latency_ms']}ms, "
             f"평균 run 비용 ${s['avg_run_cost_usd']}, 시도당 호출 {s['llm_calls_per_attempt']}회"
+            + (f", 구독 호출 누적 {s['total_subscription_calls']}회" if _uses_subscription() else "")
         )
     print("\n## 판정 상세 (조건/시도/합격 — 불합격 사유 앞부분)")
     for r in results:
@@ -167,8 +332,11 @@ def main() -> None:
 
     out_path = measure_root / f"pattern_value_{stamp}.json"
     out_path.write_text(
-        json.dumps({"prompt": PROMPT, "rubric": RUBRIC, "k": args.k, "summaries": summaries,
-                    "results": results}, ensure_ascii=False, indent=2),
+        json.dumps({"prompt": PROMPT, "rubric": RUBRIC, "k": args.k,
+                    "generator": _GENERATOR_BACKEND, "evaluator": _EVALUATOR_BACKEND,
+                    "requested_generator": args.generator, "requested_evaluator": args.evaluator,
+                    "fallback_used": any(w.used_fallback for w in _FALLBACK_WRAPPERS),
+                    "summaries": summaries, "results": results}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     print(f"\n[ok] 전체 결과 저장: {out_path}")
