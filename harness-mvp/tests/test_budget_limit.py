@@ -197,6 +197,88 @@ class RefinementBudgetTest(unittest.TestCase):
         self.assertIn("결과", final)
 
 
+class AgentSubscriptionCallsCountedTest(unittest.TestCase):
+    """에이전트가 쓴 구독 호출이 예산에 반영되는지 (2026-07-29에 누락 발견).
+
+    `budget.add`는 `generate_with_retry`에만 있었는데 **에이전트는 그 경로를 안 지난다** —
+    턴 상한만큼(기본 8회) 구독을 쓰면서 예산 추적에는 0으로 보였다. `agentic_task`가
+    구독 한도를 가장 많이 쓰는 패턴이라(§8) 이게 빠지면 `budget_subscription_calls`
+    상한이 정작 가장 비싼 패턴을 못 막는다.
+
+    **이 run 안에서는 막을 게 없다**(에이전트 뒤에 다른 호출이 없다). 그래도 고쳐야 하는
+    이유는 기록이 틀리면 **상한값을 정할 근거 자체가 틀어지기** 때문이다 — 20이라는 값도
+    패턴별 이론상 최대에서 나왔다.
+    """
+
+    def setUp(self) -> None:
+        self.tmp_dir = Path(tempfile.mkdtemp(prefix="budget-agent-"))
+        self.addCleanup(shutil.rmtree, self.tmp_dir, ignore_errors=True)
+
+    def test_agent_turns_are_added_to_the_tracker(self) -> None:
+        from harness.schemas import AgentRunResult, AgentToolUse, AgentTurn
+
+        turns = [
+            AgentTurn(turn_index=i, text="작업", tool_uses=[AgentToolUse(tool="Write", target="a.md")])
+            for i in range(1, 6)
+        ]
+
+        class _FakeAgent(Provider):
+            def generate(self, prompt: str, *, temperature: float = 0.7):  # 에이전트 경로에선 안 쓰인다
+                raise AssertionError("generate가 불려선 안 된다")
+
+            def run_agent(self, prompt, workspace, *, max_turns, **kwargs):
+                (workspace / "a.md").write_text("본문", encoding="utf-8")
+                return AgentRunResult(
+                    turns=turns, final_text="완료", num_turns=len(turns),
+                    latency_ms=10, cost_usd=None, subscription_calls=len(turns),
+                    stop_reason="completed",
+                )
+
+        agent = _FakeAgent(
+            ProviderConfig(provider_id="agent", model_id="claude-cli", auth_mode="cli_subscription")
+        )
+        run_dir = run_store.create_run(run_id="run-agent-budget", root=self.tmp_dir)
+        tracker = BudgetTracker(limit_calls=20)
+
+        orchestrator._run_agentic_task(
+            TaskInput(task_id="agent-budget", prompt="파일을 만들어줘"),
+            {orchestrator.AGENT_PROVIDER_KEY: agent},
+            run_dir,
+            tracker,
+        )
+
+        self.assertEqual(tracker.subscription_calls, 5)
+
+    def test_agent_does_not_start_when_calls_are_exhausted(self) -> None:
+        """에이전트는 턴 상한까지 여러 번 호출하므로 시작 자체를 막아야 한다 —
+        중간에 끊으면 파일을 쓰다 만 상태가 남는다."""
+
+        class _MustNotRun(Provider):
+            def generate(self, prompt: str, *, temperature: float = 0.7):
+                raise AssertionError("호출되면 안 된다")
+
+            def run_agent(self, *a, **k):
+                raise AssertionError("예산이 소진됐는데 에이전트가 시작됐다")
+
+        agent = _MustNotRun(
+            ProviderConfig(provider_id="agent", model_id="claude-cli", auth_mode="cli_subscription")
+        )
+        run_dir = run_store.create_run(run_id="run-agent-blocked", root=self.tmp_dir)
+        tracker = BudgetTracker(limit_calls=1)
+        tracker.add(Candidate(model_id="m", content="x", subscription_calls=1))  # 소진
+
+        observation = orchestrator._run_agentic_task(
+            TaskInput(task_id="agent-blocked", prompt="파일을 만들어줘"),
+            {orchestrator.AGENT_PROVIDER_KEY: agent},
+            run_dir,
+            tracker,
+        )
+
+        self.assertEqual(observation.status, "error")
+        errors = run_store.read_json(run_dir, "errors.json")
+        self.assertTrue(any(e.get("kind") == "budget" for e in errors))
+
+
 class _RejectingJudge(_CountingProvider):
     """rubric을 절대 통과시키지 않는 evaluator — 라운드를 상한까지 돌리기 위한 것."""
 

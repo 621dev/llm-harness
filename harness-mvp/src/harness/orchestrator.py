@@ -47,7 +47,16 @@ from . import (
 )
 from . import finalization
 from .budget import BudgetTracker
-from .schemas import Approval, DelegationStep, Observation, Plan, RefinementRound, RunMetrics, TaskInput
+from .schemas import (
+    Approval,
+    Candidate,
+    DelegationStep,
+    Observation,
+    Plan,
+    RefinementRound,
+    RunMetrics,
+    TaskInput,
+)
 
 MIN_CANDIDATES = 2  # Section 6: fan_out_judge, 이 이상 성공해야 평가를 진행한다
 
@@ -654,6 +663,27 @@ def _run_agentic_task(
             completed=0,
             failed=1,
         )
+
+    # 에이전트가 쓴 구독 호출을 예산에 반영한다 (2026-07-29에 누락 발견).
+    # `budget.add`는 `generate_with_retry`에만 있었는데 **에이전트는 그 경로를 안 지난다** —
+    # 턴 상한만큼(기본 8회) 구독을 쓰면서 예산 추적에는 0으로 보였다. `agentic_task`가
+    # 구독 한도를 가장 많이 쓰는 패턴이라 이게 빠지면 `budget_subscription_calls` 상한이
+    # 정작 가장 비싼 패턴을 못 막는다.
+    #
+    # **`try` 밖에 둔다**: 처음엔 `run_agent_task` 바로 뒤(try 안)에 뒀는데, 여기서 뭔가
+    # 잘못되면 위 `except`가 잡아 "에이전트 실행 실패"로 **오보고**했다(테스트 6건이 그렇게
+    # 깨졌다). 예산 기록 실패를 에이전트 실패로 보고하면 원인 추적이 끊긴다.
+    #
+    # `model_id`는 provider에서 읽지 않고 고정 문구를 쓴다 — 이 Candidate는 예산 집계용
+    # 임시 값이고, provider 대역이 그 속성을 안 가질 수도 있다.
+    budget.add(
+        Candidate(
+            model_id="agentic_task",
+            content="",
+            cost_usd=result.cost_usd,
+            subscription_calls=result.subscription_calls,
+        )
+    )
 
     errors: list[dict[str, str]] = []
     if result.blocked_tool_uses:
