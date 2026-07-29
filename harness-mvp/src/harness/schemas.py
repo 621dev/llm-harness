@@ -137,6 +137,11 @@ class RefinementVerdict(BaseModel):
 
     passed: bool
     feedback: str
+    # 미충족으로 지목된 rubric 항목 (2026-07-29). 2차 측정에서 evaluator가 rubric에
+    # 없는 요건("시각 자료가 없다")을 발명해 불합격시킨 게 관측돼서, 판정을 rubric
+    # 항목에 묶기 위해 출력에 넣게 했다. `passed=False`인데 이게 비어 있으면 바로
+    # 그 실패 유형이라는 신호다(feedback 앞에 표시가 붙는다 — judge.py 참고).
+    unmet_rubric_items: list[str] = Field(default_factory=list)
     latency_ms: Optional[int] = None
     cost_usd: Optional[float] = None
     subscription_calls: int = 0  # evaluator 호출이 구독 provider였다면 그 횟수

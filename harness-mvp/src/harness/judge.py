@@ -93,6 +93,7 @@ def check_pass(
     rubric: list[str],
     judge_provider: Provider,
     *,
+    request: Optional[str] = None,
     budget: Optional[BudgetTracker] = None,
 ) -> RefinementVerdict:
     """콘텐츠 하나가 rubric을 통과하는지 판정한다 (iterative_refinement 전용).
@@ -102,7 +103,7 @@ def check_pass(
     정도인지 판단하게 한다. feedback은 fail일 때 다음 라운드 generator 프롬프트에
     그대로 들어가므로 "무엇을 어떻게 고쳐야 하는지"를 요구한다.
     """
-    prompt = _build_pass_prompt(content, rubric)
+    prompt = _build_pass_prompt(content, rubric, request)
 
     judge_candidate = model_runner.generate_with_retry(judge_provider, prompt, temperature=0.0, budget=budget)
     if judge_candidate.status == "error":
@@ -113,21 +114,57 @@ def check_pass(
     return RefinementVerdict(
         passed=parsed["passed"],
         feedback=parsed["feedback"],
+        unmet_rubric_items=parsed["unmet_rubric_items"],
         latency_ms=judge_candidate.latency_ms,
         cost_usd=judge_candidate.cost_usd,
         subscription_calls=judge_candidate.subscription_calls,
     )
 
 
-def _build_pass_prompt(content: str, rubric: list[str]) -> str:
+def _build_pass_prompt(content: str, rubric: list[str], request: Optional[str] = None) -> str:
+    """rubric 충족 여부만 묻는 판정 프롬프트를 만든다.
+
+    **2026-07-29 개편** — 2차 측정에서 불합격 2건이 **둘 다 판정자 문제**로 관측됐고,
+    유형이 둘로 갈렸다(1차 때 "정황"이던 것이 재현됐다):
+
+    1. **rubric 밖 요건을 발명한다.** rubric이 `[출처 신뢰성, 핵심 정보 커버리지]`
+       뿐인데 "시각 자료가 없다"를 커버리지 필수 요건으로 만들어 불합격시켰다.
+       심지어 같은 응답에서 "매우 훌륭하게 작성되었습니다"라고 칭찬했다 — 결함을
+       자유롭게 찾은 뒤 rubric에 사후 연결하는 패턴이다.
+       → `unmet_items`로 **어느 rubric 항목이 왜 미충족인지 명시하게** 강제한다.
+         자유 서술만으로는 이 연결을 건너뛸 수 있다.
+    2. **요청된 산출물을 결함으로 오판한다.** 프롬프트가 "검토해줘"라고 요청해서
+       답변에 검토 섹션이 있었는데, 판정자가 그걸 "심사자인 내 역할 침범"으로 읽고
+       삭제를 지시했다. **판정자가 원본 요청을 못 보기 때문**에 생긴 오판이다.
+       → `request`를 함께 준다.
+
+    reject-first(ADR 0004)는 유지한다 — 다만 "결함을 자유롭게 찾아라"에서 **"rubric
+    항목별로 충족 여부를 근거와 함께 따져라"**로 좁힌다. 무조건 지시를 내리는 쪽으로
+    변질되던 게 문제였고, 판정 대상 없는 개선 아이디어는 판정 근거가 아니다.
+    """
     rubric_lines = "\n".join(f"- {item}" for item in rubric) or "- (rubric 없음, 일반적인 품질 기준으로 판단)"
+    request_block = (
+        f"## 답변이 응답해야 하는 원본 요청\n{request}\n\n"
+        "요청이 명시적으로 요구한 내용이 답변에 들어있는 것은 **결함이 아니다** "
+        "(예: 요청이 '검토해줘'였다면 답변의 검토 섹션은 요구된 산출물이다).\n\n"
+        if request
+        else ""
+    )
     return (
-        "당신은 LLM이 만든 답변이 기준을 충족하는지 판정하는 심사자다.\n\n"
-        "## 평가 기준 (rubric)\n"
+        "당신은 답변이 주어진 rubric을 충족하는지만 판정하는 심사자다.\n"
+        "답변을 다시 쓰거나 형식을 지시하는 사람이 아니다 — rubric 충족 여부 외의 "
+        "개선 아이디어는 판정 근거가 아니다.\n\n"
+        "## 평가 기준 (rubric) — 판정은 이 항목들로만 한다\n"
         f"{rubric_lines}\n\n"
+        f"{request_block}"
         "## 지시사항\n"
-        '- 답변의 결함/약점을 근거와 함께 먼저 찾아라. "문제 없음"을 기본값으로 삼지 마라.\n'
-        "- 찾은 결함이 rubric을 충족하지 못할 정도인지 판단하라 — 사소한 결함만 있으면 통과다.\n"
+        "- rubric **항목마다** 충족/미충족을 근거와 함께 따져라."
+        ' "문제 없음"을 기본값으로 삼지 마라.\n'
+        "- 미충족 항목이 하나도 없으면 통과다. 사소한 결함은 미충족이 아니다.\n"
+        "- **rubric 항목에 해당하지 않는 지적은 쓰지 마라** — 더 좋게 만들 아이디어가"
+        " 있어도 그건 판정 대상이 아니다.\n"
+        "- `unmet_items`에는 위 rubric 항목의 문구를 그대로 넣어라. 거기 없는 항목을"
+        " 새로 만들지 마라.\n"
         "- 통과가 아니라면 feedback에 무엇을 어떻게 고쳐야 하는지 구체적으로 써라"
         " (이 피드백만 보고 답변을 다시 쓸 수 있어야 한다).\n"
         "- 답변 길이로 판단하지 마라 — 길다고 더 나은 답은 아니다.\n"
@@ -135,7 +172,9 @@ def _build_pass_prompt(content: str, rubric: list[str]) -> str:
         "## 답변\n"
         f"{content}\n\n"
         "## 출력 형식 (JSON)\n"
-        '{"passed": <true/false>, "feedback": "<불통과 사유와 수정 지시. 통과면 빈 문자열>"}\n'
+        '{"unmet_items": ["<미충족 rubric 항목 문구>", ...], '
+        '"passed": <true/false>, '
+        '"feedback": "<미충족 사유와 수정 지시. 통과면 빈 문자열>"}\n'
     )
 
 
@@ -155,7 +194,19 @@ def _parse_pass_response(content: str) -> dict:
     feedback = parsed.get("feedback", "")
     if not isinstance(feedback, str):
         feedback = str(feedback)
-    return {"passed": parsed["passed"], "feedback": feedback}
+
+    raw_items = parsed.get("unmet_items", [])
+    unmet = [str(item) for item in raw_items if str(item).strip()] if isinstance(raw_items, list) else []
+
+    # `passed=false`인데 미충족 항목을 하나도 못 대면, 그게 바로 고치려던 실패
+    # 유형이다(rubric에 연결되지 않은 불합격). **판정을 뒤집지는 않는다** — 품질
+    # 판단 주체는 evaluator라는 게 ADR 0004의 결정이고, 여기서 pass로 바꾸면
+    # 하네스가 판정자를 덮어쓰는 셈이다. 대신 눈에 보이게 표시해서 측정 결과와
+    # refinement 피드백에서 드러나게 한다.
+    if not parsed["passed"] and not unmet:
+        feedback = f"[rubric 항목 미지정 불합격 — 판정 신뢰도 확인 필요] {feedback}"
+
+    return {"passed": parsed["passed"], "feedback": feedback, "unmet_rubric_items": unmet}
 
 
 def _assign_labels(successful: list[Candidate]) -> dict[str, Candidate]:

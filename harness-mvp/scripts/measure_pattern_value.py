@@ -215,9 +215,19 @@ def evaluate(result: dict) -> dict:
     if not result["ok"]:
         result.update({"passed": False, "feedback": "(실행 실패 — 판정 생략)", "eval_cost_usd": None})
         return result
-    verdict = judge.check_pass(result["content"], RUBRIC, _evaluator("evaluator"))
+    # PROMPT를 함께 넘긴다(2026-07-29) — 2차 측정의 direct #3 불합격이 "요청이 시켜서
+    # 들어간 검토 섹션"을 evaluator가 결함으로 오판한 것이었다. blind 판정은 **조건
+    # 라벨**(direct/chain)을 감추는 것이고, 원본 요청을 감추는 게 아니다.
+    verdict = judge.check_pass(result["content"], RUBRIC, _evaluator("evaluator"), request=PROMPT)
     result.update(
-        {"passed": verdict.passed, "feedback": verdict.feedback, "eval_cost_usd": verdict.cost_usd}
+        {
+            "passed": verdict.passed,
+            "feedback": verdict.feedback,
+            # 판정이 rubric 항목에 묶였는지 결과에 남긴다 — 비어 있는 불합격은
+            # 품질 신호가 아니라 판정 신뢰도 문제다.
+            "unmet_rubric_items": verdict.unmet_rubric_items,
+            "eval_cost_usd": verdict.cost_usd,
+        }
     )
     return result
 

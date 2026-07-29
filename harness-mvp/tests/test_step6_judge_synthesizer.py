@@ -124,12 +124,83 @@ class CheckPassTest(unittest.TestCase):
         self.assertIsNotNone(verdict.latency_ms)
 
     def test_passed_false_returns_feedback(self) -> None:
-        evaluator = self.make_evaluator('{"passed": false, "feedback": "근거를 추가하라"}')
+        evaluator = self.make_evaluator(
+            '{"unmet_items": ["명확성"], "passed": false, "feedback": "근거를 추가하라"}'
+        )
 
         verdict = judge.check_pass("부실한 답변", rubric=["명확성"], judge_provider=evaluator)
 
         self.assertFalse(verdict.passed)
         self.assertEqual(verdict.feedback, "근거를 추가하라")
+        self.assertEqual(verdict.unmet_rubric_items, ["명확성"])
+
+    def test_fail_without_named_rubric_item_is_flagged(self) -> None:
+        """2차 측정에서 관측된 실패 유형(2026-07-29): evaluator가 rubric에 없는 요건을
+        발명해 불합격시켰다("시각 자료가 없다" — rubric은 출처 신뢰성/커버리지 2개뿐).
+        같은 응답에서 "매우 훌륭하게 작성되었습니다"라고 칭찬하기까지 했다.
+
+        **판정을 뒤집지는 않는다** — 품질 판단 주체는 evaluator라는 게 ADR 0004의
+        결정이고, 하네스가 pass로 바꾸면 판정자를 덮어쓰는 셈이다. 대신 눈에 보이게
+        표시해서 측정 결과와 다음 라운드 피드백에서 드러나게 한다.
+        """
+        evaluator = self.make_evaluator('{"unmet_items": [], "passed": false, "feedback": "그림이 없다"}')
+
+        verdict = judge.check_pass("답변", rubric=["출처 신뢰성"], judge_provider=evaluator)
+
+        self.assertFalse(verdict.passed)  # 판정은 그대로
+        self.assertEqual(verdict.unmet_rubric_items, [])
+        self.assertIn("판정 신뢰도", verdict.feedback)  # 그러나 표시가 붙는다
+        self.assertIn("그림이 없다", verdict.feedback)  # 원래 사유는 보존
+
+    def test_pass_without_unmet_items_is_not_flagged(self) -> None:
+        """통과에는 미충족 항목이 없는 게 정상이므로 표시가 붙어선 안 된다."""
+        evaluator = self.make_evaluator('{"unmet_items": [], "passed": true, "feedback": ""}')
+
+        verdict = judge.check_pass("답변", rubric=["명확성"], judge_provider=evaluator)
+
+        self.assertEqual(verdict.feedback, "")
+
+    def test_prompt_scopes_judgement_to_rubric_only(self) -> None:
+        """rubric 밖 개선 아이디어를 판정 근거로 쓰지 말라는 지시가 있어야 한다."""
+        captured = self.capture_prompt(rubric=["출처 신뢰성"])
+
+        self.assertIn("rubric 항목에 해당하지 않는 지적은 쓰지 마라", captured)
+        self.assertIn("unmet_items", captured)
+
+    def test_original_request_is_given_to_the_evaluator(self) -> None:
+        """2차 측정의 direct #3 불합격 원인(2026-07-29): 프롬프트가 "검토해줘"라서 답변에
+        검토 섹션이 있었는데, evaluator가 그걸 "심사자인 내 역할 침범"으로 읽고 삭제를
+        지시했다. **판정자가 원본 요청을 못 봤기 때문**에 생긴 오판이다."""
+        captured = self.capture_prompt(rubric=["명확성"], request="문서를 쓰고 검토해줘")
+
+        self.assertIn("문서를 쓰고 검토해줘", captured)
+        self.assertIn("결함이 아니다", captured)
+
+    def test_request_block_is_omitted_when_absent(self) -> None:
+        """요청을 안 주면 그 절이 아예 없어야 한다 — 빈 절은 모델에 혼선만 준다."""
+        captured = self.capture_prompt(rubric=["명확성"])
+
+        self.assertNotIn("원본 요청", captured)
+
+    def capture_prompt(self, *, rubric: list[str], request: str | None = None) -> str:
+        captured: list[str] = []
+
+        class _Capture(Provider):
+            def generate(self, prompt: str, *, temperature: float = 0.7) -> Candidate:
+                captured.append(prompt)
+                return Candidate(
+                    model_id=self.model_id,
+                    content='{"unmet_items": [], "passed": true, "feedback": ""}',
+                    status="success",
+                )
+
+        judge.check_pass(
+            "평가 대상",
+            rubric,
+            _Capture(ProviderConfig(provider_id="eval", model_id="eval-mock")),
+            request=request,
+        )
+        return captured[0]
 
     def test_prompt_contains_rubric_and_content(self) -> None:
         captured: list[str] = []

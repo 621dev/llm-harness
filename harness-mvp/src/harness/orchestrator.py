@@ -529,7 +529,11 @@ def _run_iterative_refinement(
         generated_count += 1
 
         try:
-            verdict = judge.check_pass(candidate.content, plan.rubric, judge_provider, budget=budget)
+            # 원본 요청을 함께 준다(2026-07-29) — 안 주면 evaluator가 "요청이 시켜서
+            # 들어간 섹션"을 결함으로 오판한다(2차 측정에서 실제로 관측).
+            verdict = judge.check_pass(
+                candidate.content, plan.rubric, judge_provider, request=task.prompt, budget=budget
+            )
         except judge.JudgeError as exc:
             errors.append({"stage": f"refinement round {round_index} evaluator", "message": str(exc)})
             break
