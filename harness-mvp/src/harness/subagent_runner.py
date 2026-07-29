@@ -33,7 +33,10 @@ from pathlib import Path
 
 from providers.base import Provider
 
+from typing import Optional
+
 from . import run_store
+from .budget import BudgetTracker
 from .model_runner import generate_with_retry
 from .schemas import Candidate, DelegationStep, Observation
 
@@ -77,6 +80,8 @@ def delegate(
     input_text: str,
     run_dir: Path,
     step_index: int,
+    *,
+    budget: Optional[BudgetTracker] = None,
 ) -> Observation:
     """위임 단계 하나를 실행한다.
 
@@ -88,7 +93,7 @@ def delegate(
     step.input_ref = _preview(input_text)
 
     provider_input = _apply_role_instruction(step.role, input_text, is_first_step=step_index == 1)
-    candidate = generate_with_retry(provider, provider_input)
+    candidate = generate_with_retry(provider, provider_input, budget=budget)
     output_ref = f"artifacts/chain/step-{step_index}-{step.role}.md"
     run_store.write_markdown(run_dir, output_ref, _render_step_markdown(step, candidate))
     step.output_ref = output_ref
@@ -119,6 +124,8 @@ def run_chain(
     providers: dict[str, Provider],
     initial_input: str,
     run_dir: Path,
+    *,
+    budget: Optional[BudgetTracker] = None,
 ) -> tuple[list[Observation], bool]:
     """delegation_chain을 순서대로 실행한다 (역할별 provider에 순차 위임).
 
@@ -146,7 +153,7 @@ def run_chain(
         # 첫 스텝만 원본 요청을 그대로(래핑 없이) 받는다 — 히스토리 헤더가 안 붙어야
         # delegate()의 input_ref 미리보기가 원본 텍스트 그대로 남는다(디버깅용).
         step_input = initial_input if index == 1 else "\n\n".join(history)
-        obs = delegate(step, provider, step_input, run_dir, index)
+        obs = delegate(step, provider, step_input, run_dir, index, budget=budget)
         observations.append(obs)
 
         if obs.status == "error":

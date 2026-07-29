@@ -35,16 +35,20 @@ _ALLOWED_INTERNAL_IMPORTS: dict[str, set[str]] = {
     "schemas": set(),
     "config": set(),
     "run_store": set(),
+    # budget은 schemas만 본다 — 예산은 "얼마 썼나"만 아는 값 객체이고, 어디서
+    # 어떻게 호출하는지는 모른다(호출부가 넘겨받아 쓴다).
+    "budget": {"schemas"},
     "router": {"schemas"},
     "safety": {"schemas"},
     "synthesizer": {"schemas"},
-    "model_runner": {"run_store", "schemas"},
+    "model_runner": {"budget", "run_store", "schemas"},
     "planner": {"router", "schemas"},
-    "judge": {"model_runner", "schemas"},
-    "subagent_runner": {"run_store", "model_runner", "schemas"},
+    "judge": {"budget", "model_runner", "schemas"},
+    "subagent_runner": {"budget", "run_store", "model_runner", "schemas"},
     "agent_runner": {"run_store", "schemas"},
     "orchestrator": {
         "agent_runner",
+        "budget",
         "judge",
         "live_status",
         "model_runner",

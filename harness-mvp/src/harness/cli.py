@@ -161,6 +161,8 @@ def _providers_from_args(args: argparse.Namespace) -> dict[str, Provider]:
     orchestrator.MAX_SUBSCRIPTION_CANDIDATES = config.max_subscription_candidates
     orchestrator.MAX_REFINEMENT_ROUNDS = config.max_refinement_rounds
     orchestrator.MAX_AGENT_TURNS = config.max_agent_turns
+    orchestrator.BUDGET_USD = config.budget_usd
+    orchestrator.BUDGET_SUBSCRIPTION_CALLS = config.budget_subscription_calls
     models = _parse_models(args.models, config.candidate_models)
     return _default_providers(models, config)
 

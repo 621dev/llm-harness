@@ -44,6 +44,7 @@ from . import (
     subagent_runner,
     synthesizer,
 )
+from .budget import BudgetTracker
 from .schemas import Approval, DelegationStep, Observation, Plan, RefinementRound, RunMetrics, TaskInput
 
 MIN_CANDIDATES = 2  # Section 6: fan_out_judge, 이 이상 성공해야 평가를 진행한다
@@ -78,6 +79,14 @@ MAX_REFINEMENT_ROUNDS = 3
 # 동시에 호출하면 한도를 몇 배로 빨리 소모하므로, run당 최대 이 개수까지만 선택한다.
 # api_key provider(종량제)는 한도 걱정이 없어 개수 제한을 받지 않는다.
 MAX_SUBSCRIPTION_CANDIDATES = 1
+
+# run 하나의 예산 상한 (2026-07-29, ECC `cost-aware-llm-pipeline` 재분석). 둘 다 None이면
+# 아무것도 막지 않는다 — 기존 동작 유지가 기본값이다. 금액과 구독 한도는 서로 다른
+# 자원이라 합칠 수 없어 따로 둔다(`budget.py` 참고). 비용 직결 값이라 config.json의
+# budget_usd / budget_subscription_calls로 조정 — cli.py가 MAX_AGENT_TURNS와 같은
+# 방식으로 실행 시 반영한다.
+BUDGET_USD: Optional[float] = None
+BUDGET_SUBSCRIPTION_CALLS: Optional[int] = None
 
 _REPLAY_FILES = (
     "plan.md",
@@ -247,14 +256,17 @@ def _await_approval(run_dir: Path, plan: Plan) -> Observation:
 
 
 def _run_pattern(task: TaskInput, plan: Plan, providers: dict[str, Provider], run_dir: Path) -> Observation:
+    # 예산 추적은 run 하나에 스코프된다 — 패턴 핸들러를 거쳐 모든 LLM 호출 경로로
+    # 전달되고, 상한이 없으면(기본값) 아무 동작도 하지 않는다.
+    budget = BudgetTracker(limit_usd=BUDGET_USD, limit_calls=BUDGET_SUBSCRIPTION_CALLS)
     if plan.team_pattern == "fan_out_judge":
-        return _run_fan_out_judge(task, plan, providers, run_dir)
+        return _run_fan_out_judge(task, plan, providers, run_dir, budget)
     if plan.team_pattern == "hierarchical_delegation":
-        return _run_hierarchical_delegation(task, plan, providers, run_dir)
+        return _run_hierarchical_delegation(task, plan, providers, run_dir, budget)
     if plan.team_pattern == "iterative_refinement":
-        return _run_iterative_refinement(task, plan, providers, run_dir)
+        return _run_iterative_refinement(task, plan, providers, run_dir, budget)
     if plan.team_pattern == "agentic_task":
-        return _run_agentic_task(task, providers, run_dir)
+        return _run_agentic_task(task, providers, run_dir, budget)
     raise ValueError(f"unknown team_pattern: {plan.team_pattern!r}")
 
 
@@ -293,7 +305,7 @@ def _limit_subscription_candidates(candidate_providers: list[Provider]) -> list[
 
 def _run_direct_call(task: TaskInput, providers: dict[str, Provider], run_dir: Path) -> Observation:
     provider = next(iter(_candidate_providers(providers).values()))
-    candidate = model_runner.direct_call(task.prompt, provider)
+    candidate = model_runner.direct_call(task.prompt, provider)  # 단발 호출이라 상한 대상 아님
     errors = (
         []
         if candidate.status == "success"
@@ -312,7 +324,9 @@ def _run_direct_call(task: TaskInput, providers: dict[str, Provider], run_dir: P
     )
 
 
-def _run_fan_out_judge(task: TaskInput, plan: Plan, providers: dict[str, Provider], run_dir: Path) -> Observation:
+def _run_fan_out_judge(
+    task: TaskInput, plan: Plan, providers: dict[str, Provider], run_dir: Path, budget: BudgetTracker
+) -> Observation:
     judge_provider = providers.get(JUDGE_PROVIDER_KEY)
     if judge_provider is None:
         raise ValueError(
@@ -323,7 +337,7 @@ def _run_fan_out_judge(task: TaskInput, plan: Plan, providers: dict[str, Provide
     candidate_providers = _limit_subscription_candidates(list(_candidate_providers(providers).values()))
     num_candidates = plan.num_candidates if plan.num_candidates is not None else len(candidate_providers)
     selected = candidate_providers[:num_candidates]
-    candidates = model_runner.run_all(task.prompt, selected, run_dir)
+    candidates = model_runner.run_all(task.prompt, selected, run_dir, budget=budget)
 
     # 후보 하나가 재시도까지 실패해도 run 전체가 성공할 수 있다 — 그래도 DoD/Section 6에
     # 따라 그 실패는 errors.json에 반드시 남긴다 (전체 성공 여부와 무관하게).
@@ -332,6 +346,10 @@ def _run_fan_out_judge(task: TaskInput, plan: Plan, providers: dict[str, Provide
         for c in candidates
         if c.status == "error"
     ]
+    if len(candidates) < len(selected):
+        # run_all이 예산 상한에 걸려 남은 provider를 호출하지 않고 멈췄다.
+        # 후보가 아예 안 만들어진 provider는 error Candidate조차 없으므로 여기서 남긴다.
+        errors.append({"stage": "fan_out_judge", "message": budget.reason})
 
     successful = [c for c in candidates if c.status == "success"]
     completed, failed = len(successful), len(candidates) - len(successful)
@@ -352,7 +370,7 @@ def _run_fan_out_judge(task: TaskInput, plan: Plan, providers: dict[str, Provide
         )
 
     try:
-        judging = judge.evaluate(candidates, plan.rubric, judge_provider)
+        judging = judge.evaluate(candidates, plan.rubric, judge_provider, budget=budget)
     except judge.JudgeError as exc:
         errors.append({"stage": "judge", "message": str(exc)})
         return _finalize_without_output(
@@ -374,10 +392,10 @@ def _run_fan_out_judge(task: TaskInput, plan: Plan, providers: dict[str, Provide
 
 
 def _run_hierarchical_delegation(
-    task: TaskInput, plan: Plan, providers: dict[str, Provider], run_dir: Path
+    task: TaskInput, plan: Plan, providers: dict[str, Provider], run_dir: Path, budget: BudgetTracker
 ) -> Observation:
     observations, chain_completed = subagent_runner.run_chain(
-        plan.delegation_chain, providers, task.prompt, run_dir
+        plan.delegation_chain, providers, task.prompt, run_dir, budget=budget
     )
     executed_steps = plan.delegation_chain[: len(observations)]
     completed = sum(1 for step in executed_steps if step.status == "success")
@@ -430,7 +448,7 @@ def _render_chain_final(run_dir: Path, steps: list[DelegationStep]) -> str:
 
 
 def _run_iterative_refinement(
-    task: TaskInput, plan: Plan, providers: dict[str, Provider], run_dir: Path
+    task: TaskInput, plan: Plan, providers: dict[str, Provider], run_dir: Path, budget: BudgetTracker
 ) -> Observation:
     """생성 → 합격 판정 → 피드백 반영 재생성을 반복한다 (반복 개선 루프).
 
@@ -466,7 +484,12 @@ def _run_iterative_refinement(
     prompt = task.prompt
 
     for round_index in range(1, MAX_REFINEMENT_ROUNDS + 1):
-        candidate = model_runner.generate_with_retry(generator, prompt)
+        if budget.exhausted:
+            # 라운드마다 생성+판정 2회를 쓰므로 시작 전에 막는 게 의미가 크다.
+            # 이미 만든 산출물은 아래에서 partial로 승격된다.
+            errors.append({"stage": f"refinement round {round_index}", "message": budget.reason})
+            break
+        candidate = model_runner.generate_with_retry(generator, prompt, budget=budget)
         latency_parts.append(candidate.latency_ms)
         cost_parts.append(candidate.cost_usd)
         subscription_calls += candidate.subscription_calls
@@ -484,7 +507,7 @@ def _run_iterative_refinement(
         generated_count += 1
 
         try:
-            verdict = judge.check_pass(candidate.content, plan.rubric, judge_provider)
+            verdict = judge.check_pass(candidate.content, plan.rubric, judge_provider, budget=budget)
         except judge.JudgeError as exc:
             errors.append({"stage": f"refinement round {round_index} evaluator", "message": str(exc)})
             break
@@ -548,7 +571,9 @@ def _run_iterative_refinement(
     )
 
 
-def _run_agentic_task(task: TaskInput, providers: dict[str, Provider], run_dir: Path) -> Observation:
+def _run_agentic_task(
+    task: TaskInput, providers: dict[str, Provider], run_dir: Path, budget: BudgetTracker
+) -> Observation:
     """자율 에이전트에게 작업을 맡기고, 그 실행을 감싸서 기록한다 (ADR 0007).
 
     다른 세 패턴과 근본적으로 다른 점: 여기서는 하네스가 루프를 돌리지 않는다.
@@ -566,6 +591,19 @@ def _run_agentic_task(task: TaskInput, providers: dict[str, Provider], run_dir: 
         raise ValueError(
             f"agentic_task에는 에이전트 provider가 필요하다 "
             f"(providers[{AGENT_PROVIDER_KEY!r}]에 등록, ADR 0007 참고)"
+        )
+
+    if budget.exhausted:
+        # 에이전트는 턴 상한까지 여러 번 호출하므로 시작 자체를 막는다 — 중간에
+        # 끊으면 파일을 쓰다 만 상태가 남는다.
+        return _finalize_without_output(
+            run_dir,
+            errors=[{"stage": "agentic_task", "message": budget.reason}],
+            latency_ms=None,
+            cost_usd=None,
+            subscription_calls=0,
+            completed=0,
+            failed=1,
         )
 
     try:

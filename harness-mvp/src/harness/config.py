@@ -17,6 +17,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from typing import Optional
+
 from pydantic import BaseModel, Field
 
 # run_store.DEFAULT_WORKSPACE_ROOT과 동일한 원칙: 패키지 설치 위치가 아니라 cwd
@@ -61,6 +63,13 @@ class HarnessConfig(BaseModel):
     - max_agent_turns: agentic_task에서 에이전트가 도구를 호출하며 진행할 수
       있는 최대 턴 수(ADR 0007). 구독 사용량과 "얼마나 많은 파일을 만들 수
       있는가"에 직결되는 값이라 코드 밖으로 뺐다.
+    - budget_usd / budget_subscription_calls: run 하나의 예산 상한
+      (2026-07-29). 위 max_* 값들은 **횟수** 상한이고, 이 둘은 **소모량** 상한이다 —
+      라운드 수가 같아도 프롬프트/응답이 길면 금액은 몇 배가 될 수 있다.
+      금액과 구독 한도는 서로 다른 자원이라 합칠 수 없어 따로 둔다(구독 호출은
+      cost_usd가 None이라 금액 지표에 안 잡힌다). 둘 다 null(기본값)이면 아무것도
+      막지 않는다. 상한에 걸리면 run은 error가 아니라 partial로 끝난다 — 이미 만든
+      산출물을 버리면 그때까지 쓴 비용이 통째로 낭비되므로.
     """
 
     candidate_models: list[str] = Field(default_factory=lambda: ["claude", "codex", "gemini"])
@@ -71,6 +80,8 @@ class HarnessConfig(BaseModel):
     max_subscription_candidates: int = 1
     max_refinement_rounds: int = 3
     max_agent_turns: int = 8
+    budget_usd: Optional[float] = None
+    budget_subscription_calls: Optional[int] = None
 
 
 def load_config(path: Path | None = None) -> HarnessConfig:

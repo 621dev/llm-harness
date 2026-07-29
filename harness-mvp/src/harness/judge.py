@@ -29,7 +29,10 @@ import string
 
 from providers.base import Provider
 
+from typing import Optional
+
 from . import model_runner
+from .budget import BudgetTracker
 from .schemas import Judging, JudgingScore, Candidate, RefinementVerdict
 
 _MERGE_THRESHOLD = 0.1  # 1·2등 점수 차이가 이 값(0~1 스케일) 미만이면 병합 전략 추천
@@ -39,7 +42,13 @@ class JudgeError(RuntimeError):
     """judge_provider 호출이 끝내 실패했거나 응답을 파싱할 수 없다."""
 
 
-def evaluate(candidates: list[Candidate], rubric: list[str], judge_provider: Provider) -> Judging:
+def evaluate(
+    candidates: list[Candidate],
+    rubric: list[str],
+    judge_provider: Provider,
+    *,
+    budget: Optional[BudgetTracker] = None,
+) -> Judging:
     """성공한 candidate만 judge_provider로 실제 평가한다.
 
     성공한 candidate가 하나도 없으면 예외를 던진다 — min_candidates 판단은
@@ -53,7 +62,7 @@ def evaluate(candidates: list[Candidate], rubric: list[str], judge_provider: Pro
     labels = _assign_labels(successful)
     prompt = _build_prompt(rubric, labels)
 
-    judge_candidate = model_runner.generate_with_retry(judge_provider, prompt, temperature=0.0)
+    judge_candidate = model_runner.generate_with_retry(judge_provider, prompt, temperature=0.0, budget=budget)
     if judge_candidate.status == "error":
         raise JudgeError(f"judge 호출 실패: {judge_candidate.content}")
 
@@ -79,7 +88,13 @@ def evaluate(candidates: list[Candidate], rubric: list[str], judge_provider: Pro
     )
 
 
-def check_pass(content: str, rubric: list[str], judge_provider: Provider) -> RefinementVerdict:
+def check_pass(
+    content: str,
+    rubric: list[str],
+    judge_provider: Provider,
+    *,
+    budget: Optional[BudgetTracker] = None,
+) -> RefinementVerdict:
     """콘텐츠 하나가 rubric을 통과하는지 판정한다 (iterative_refinement 전용).
 
     evaluate()(N개 후보 비교)와 다른 질문이라 별도 함수다. reject-first 원칙은
@@ -89,7 +104,7 @@ def check_pass(content: str, rubric: list[str], judge_provider: Provider) -> Ref
     """
     prompt = _build_pass_prompt(content, rubric)
 
-    judge_candidate = model_runner.generate_with_retry(judge_provider, prompt, temperature=0.0)
+    judge_candidate = model_runner.generate_with_retry(judge_provider, prompt, temperature=0.0, budget=budget)
     if judge_candidate.status == "error":
         raise JudgeError(f"evaluator 호출 실패: {judge_candidate.content}")
 

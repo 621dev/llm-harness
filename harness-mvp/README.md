@@ -30,7 +30,7 @@ Phase 3 검증: mock 아님 — 실제 claude/codex CLI(구독) + Gemini REST AP
 cd harness-mvp
 pip install -e .[dev]                                     # pydantic + pytest 설치
 
-python -m pytest tests/ -v                                # 346개, 전부 mock — 실제 CLI/API 미호출
+python -m pytest tests/ -v                                # 357개, 전부 mock — 실제 CLI/API 미호출
 
 PYTHONPATH=src python -m harness.cli run --task examples/task.fan_out.json
 PYTHONPATH=src python -m harness.cli run --task examples/task.fan_out.json --models claude,gemini  # 이 실행만 후보 모델 오버라이드(codex 제외)
@@ -70,9 +70,19 @@ Windows PowerShell: `$env:PYTHONPATH="src"; python -m harness.cli run --task ...
   "delegation_model": "claude",
   "max_subscription_candidates": 1,
   "max_refinement_rounds": 3,
-  "max_agent_turns": 8
+  "max_agent_turns": 8,
+  "budget_usd": null,
+  "budget_subscription_calls": null
 }
 ```
+
+`budget_usd`/`budget_subscription_calls`는 **run 하나의 소모량 상한**이다(2026-07-29).
+위 `max_*`가 **횟수** 상한인 것과 다르다 — 라운드 수가 같아도 프롬프트/응답이 길면
+금액은 몇 배가 된다. 금액과 구독 한도는 서로 다른 자원이라 합칠 수 없어 따로 둔다
+(구독 호출은 `cost_usd`가 `None`이라 금액 지표에 안 잡힌다). **둘 다 `null`(기본값)
+이면 아무것도 막지 않는다.** 상한에 걸리면 다음 호출을 시작하지 않고, run은 error가
+아니라 **partial**로 끝난다 — 이미 만든 산출물을 버리면 그때까지 쓴 비용이 통째로
+낭비되므로. 자세한 설계는 `src/harness/budget.py`.
 
 `candidate_models`: `run`/`approve`의 `--models` 플래그로 그 실행만 오버라이드
 가능. `judge_model`/`delegation_model`: `--models`로 변경 불가(ADR 0004 —
@@ -234,7 +244,7 @@ dashboard/failure_analysis/live_status → cli). CI 없는 프로젝트라 "린�
 검증**: `schemas.py`에 `from . import orchestrator`(역방향) 임시 추가 →
 테스트가 정확히 잡아내는 것 확인 후 원복.
 
-## 테스트 (346개, 전부 통과)
+## 테스트 (357개, 전부 통과)
 
 새 테스트 파일 추가/파일별 개수 변경 시 이 표도 같이 갱신(2026-07-24 문서
 감사에서 실제(239개)와 다른 옛 숫자(141개)로 오래 방치된 것 발견 —
@@ -269,6 +279,7 @@ dashboard/failure_analysis/live_status → cli). CI 없는 프로젝트라 "린�
 | `test_architecture_layers.py` | 6 | `harness/*.py` 상대 import 추출(순수 함수), 전체 모듈의 허용 계층 준수 여부(`agent_runner` 포함) |
 | `test_quota_fallback_provider.py` | 5 | `QuotaFallbackProvider`(2026-07-27) — quota 오류 시 2차 provider로 전환, quota 아닌 실패는 그대로 전파(폴백 안 함), 성공 시 폴백 안 건드림, **폴백 시 `auth_mode`가 답한 쪽을 따라가는지**(안 그러면 구독 호출이 `subscription_calls`에서 누락, 2026-07-28 회귀 방지) |
 | `test_provider_contract.py` | 6 | **Provider 구현체 전체의 공통 계약**(2026-07-29) — 리플렉션으로 구현체를 찾아 등록표 누락/잔재를 잡고(새 구현체가 조용히 빠지는 것 방지), `auth_mode` 유효값, 정체성 필드, **실패가 `ProviderError`인지**(재시도 분류가 이 계약에 하중을 걸고 있다). API 키 환경변수를 비워서 키 있는 머신에서도 실제 호출이 안 나가게 한다 |
+| `test_budget_limit.py` | 11 | **run 예산 상한**(2026-07-29) — 상한 없으면 기존 동작 그대로, 상한 도달 시 다음 호출을 시작하지 않음(provider 호출 횟수로 확인), 금액/구독 호출이 서로 다른 자원임, 실패한 시도도 예산을 깎음, fan-out이 남은 provider를 건너뜀, refinement가 라운드를 조기 종료하고 **partial로 산출물 보존**. `0.09+0.01 < 0.10` 부동소수점 때문에 상한을 지나치던 구현 버그를 이 테스트가 잡았다 |
 
 ```bash
 python -m pytest tests/ -v

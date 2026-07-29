@@ -13,10 +13,12 @@ artifacts/candidates/<model_id>.md로 저장한다. provider 호출이 실패하
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Optional
 
 from providers.base import Provider, ProviderError
 
 from . import run_store
+from .budget import BudgetTracker
 from .schemas import Candidate
 
 MAX_RETRIES = 1  # Section 6 복구 전략: 1회 재시도, 상한 고정(무한 재시도 금지)
@@ -28,15 +30,22 @@ def run_all(
     run_dir: Path,
     *,
     temperature: float = 0.7,
+    budget: Optional[BudgetTracker] = None,
 ) -> list[Candidate]:
     """등록된 provider를 순회하며 독립적으로 후보를 생성한다 (fan_out_judge 전용).
 
     후보 수는 providers 길이로 결정된다 (Planner가 아직 없어 지금은 호출부가 provider
     목록을 직접 구성한다 — Step 4에서 plan.num_candidates 기반으로 자동 구성될 예정).
+
+    예산 상한에 걸리면 **남은 provider는 호출하지 않고 루프를 끝낸다**(2026-07-29).
+    상한 도달 후에도 계속 돌면서 provider마다 실패 후보를 만들면 errors.json이 같은
+    이유로 도배된다 — 첫 한 건만 남기고 멈추는 게 읽기 쉽다.
     """
     candidates: list[Candidate] = []
     for provider in providers:
-        candidate = generate_with_retry(provider, prompt, temperature=temperature)
+        if budget is not None and budget.exhausted:
+            break
+        candidate = generate_with_retry(provider, prompt, temperature=temperature, budget=budget)
         candidates.append(candidate)
         run_store.write_markdown(
             run_dir,
@@ -46,16 +55,28 @@ def run_all(
     return candidates
 
 
-def direct_call(prompt: str, provider: Provider, *, temperature: float = 0.7) -> Candidate:
+def direct_call(
+    prompt: str,
+    provider: Provider,
+    *,
+    temperature: float = 0.7,
+    budget: Optional[BudgetTracker] = None,
+) -> Candidate:
     """적합성 게이트(router.check_fitness) 탈락 시 쓰는 단일 모델 호출 경로 (Section 12.1).
 
     패턴 분기(fan_out_judge/hierarchical_delegation) 자체를 건너뛰므로 후보 비교나
     체인 위임 없이 provider 하나만 호출한다. 재시도 규칙은 run_all과 동일하다.
     """
-    return generate_with_retry(provider, prompt, temperature=temperature)
+    return generate_with_retry(provider, prompt, temperature=temperature, budget=budget)
 
 
-def generate_with_retry(provider: Provider, prompt: str, *, temperature: float = 0.7) -> Candidate:
+def generate_with_retry(
+    provider: Provider,
+    prompt: str,
+    *,
+    temperature: float = 0.7,
+    budget: Optional[BudgetTracker] = None,
+) -> Candidate:
     """1회 재시도(Section 6, 상한 고정) 후에도 실패하면 status="error" Candidate를 반환한다.
 
     fan_out_judge(run_all)와 hierarchical_delegation(subagent_runner.delegate) 양쪽이
@@ -71,6 +92,19 @@ def generate_with_retry(provider: Provider, prompt: str, *, temperature: float =
     사라졌는데, 1차가 한도 초과이고 2차가 파싱 오류면 최종 기록에 한도 얘기가 아예
     안 나와 원인 추적이 끊긴다.
     """
+    if budget is not None and budget.exhausted:
+        # 호출을 시작하지 않는다 — 이미 쓴 돈은 되돌릴 수 없으니 상한이 할 수 있는 일은
+        # 이것뿐이다. provider 실패와 구분되게 이유를 명시한다(마스킹 금지 원칙).
+        return Candidate(
+            model_id=provider.model_id,
+            content=f"(budget) {budget.reason}",
+            tokens=None,
+            latency_ms=None,
+            cost_usd=None,
+            status="error",
+            subscription_calls=0,  # 호출하지 않았으므로 소모 0
+        )
+
     errors: list[Exception] = []
     attempts = 0
     for _attempt in range(MAX_RETRIES + 1):
@@ -82,13 +116,15 @@ def generate_with_retry(provider: Provider, prompt: str, *, temperature: float =
             # 그대로 쓴다 — 여기가 모든 generate() 호출이 지나는 유일한 지점이라
             # 재시도까지 정확히 셀 수 있는 자리다.
             candidate.subscription_calls = attempts if _is_subscription(provider) else 0
+            if budget is not None:
+                budget.add(candidate)
             return candidate
         except Exception as exc:  # noqa: BLE001 - provider 구현체마다 예외 타입이 다를 수 있음
             errors.append(exc)
             if not _is_retryable(exc):
                 break
 
-    return Candidate(
+    failed = Candidate(
         model_id=provider.model_id,
         content=f"(error) {_render_errors(errors)}",
         tokens=None,
@@ -98,6 +134,9 @@ def generate_with_retry(provider: Provider, prompt: str, *, temperature: float =
         # 끝내 실패했어도 시도한 만큼 구독 한도는 이미 소모됐다.
         subscription_calls=attempts if _is_subscription(provider) else 0,
     )
+    if budget is not None:
+        budget.add(failed)  # 실패한 시도도 한도를 깎았으므로 예산에서도 빠져야 한다
+    return failed
 
 
 def _is_retryable(exc: Exception) -> bool:
