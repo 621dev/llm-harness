@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import ast
+import re
 import unittest
 from pathlib import Path
 
@@ -172,6 +173,70 @@ class ModuleSizeGuardTest(unittest.TestCase):
             f"가장 큰 모듈이 {largest}줄로 상한({self.MAX_LINES})의 절반 미만이다 — "
             f"상한을 낮춰서 감시가 계속 유효하게 할 것.",
         )
+
+
+class DocumentedTestCountTest(unittest.TestCase):
+    """문서에 적힌 테스트 개수가 실제와 맞는지 (2026-07-29 추가).
+
+    **왜 필요했나**: 개수를 네 문서에서 손으로 맞춰왔고, 2026-07-29에 **네 번 연속
+    조용히 어긋났다.** 원인은 문자열 치환이 잘못된 전제(`# 388개`)로 시작해 실제 값
+    (`386개`)과 안 맞아 no-op이 됐고, 실패를 알려주는 게 없었기 때문이다. 그래서
+    `README.md`와 인수인계 문서가 22개나 뒤처진 채로 커밋됐다.
+
+    "다음에 잘 맞추자"는 사람 기억에 맡기는 방식이고 이미 실패했다 — 어긋나면
+    테스트가 실패하게 한다. 진행상황 문서에 오래 방치된 "테스트 개수 자기검증" 항목이
+    바로 이것이다.
+
+    **AST로 센다**(pytest 실행이 아니라): 테스트 안에서 pytest를 다시 돌리면 재귀가
+    되고, 수집만 해도 느리다. `def test_*` 개수가 pytest 보고 수와 정확히 일치하는 걸
+    확인했다(2026-07-29: 둘 다 408) — parametrize를 쓰지 않는 코드베이스라 성립한다.
+    subTest는 개수를 늘리지 않으므로(같은 테스트 함수 안에서 도는 것) 영향 없다.
+    """
+
+    def actual_count(self) -> int:
+        tests_dir = Path(__file__).resolve().parent
+        return sum(
+            1
+            for path in tests_dir.glob("test_*.py")
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name.startswith("test_")
+        )
+
+    def documented_counts(self, text: str) -> list[int]:
+        """"테스트 N개" / "# N개" 형태로 적힌 숫자를 뽑는다."""
+        return [int(m) for m in re.findall(r"테스트[ ]*\*{0,2}(\d{3})개", text)] + [
+            int(m) for m in re.findall(r"pytest tests/ -v\s*#\s*(\d{3})개", text)
+        ]
+
+    def test_readme_count_matches_reality(self) -> None:
+        readme = Path(__file__).resolve().parents[1] / "README.md"
+        documented = self.documented_counts(readme.read_text(encoding="utf-8"))
+
+        self.assertTrue(documented, "README.md에서 테스트 개수를 못 찾았다 — 형식이 바뀌었는지 확인")
+        for count in documented:
+            with self.subTest(documented=count):
+                self.assertEqual(
+                    count,
+                    self.actual_count(),
+                    f"README.md의 테스트 개수가 실제({self.actual_count()})와 다르다. "
+                    f"테스트를 추가/삭제했으면 문서도 같이 갱신할 것.",
+                )
+
+    def test_handoff_summary_count_matches_reality(self) -> None:
+        """인수인계 문서(가장 최신 vN)도 같이 본다 — 새 세션이 처음 읽는 숫자다."""
+        progress_dir = Path(__file__).resolve().parents[2] / "docs" / "03_진행상황"
+        summaries = sorted(progress_dir.glob("harness-handoff-summary-v*-ko.md"))
+        if not summaries:
+            self.skipTest("공개 미러에는 docs/03_진행상황이 없다(화이트리스트 제외)")
+
+        latest = max(summaries, key=lambda p: int(re.search(r"-v(\d+)-", p.name).group(1)))
+        documented = self.documented_counts(latest.read_text(encoding="utf-8"))
+
+        self.assertTrue(documented, f"{latest.name}에서 테스트 개수를 못 찾았다")
+        for count in documented:
+            with self.subTest(doc=latest.name, documented=count):
+                self.assertEqual(count, self.actual_count())
 
 
 class ExtractInternalImportsTest(unittest.TestCase):

@@ -30,7 +30,7 @@ Phase 3 검증: mock 아님 — 실제 claude/codex CLI(구독) + Gemini REST AP
 cd harness-mvp
 pip install -e .[dev]                                     # pydantic + pytest 설치
 
-python -m pytest tests/ -v                                # 386개, 전부 mock — 실제 CLI/API 미호출
+python -m pytest tests/ -v                                # 410개, 전부 mock — 실제 CLI/API 미호출
 
 PYTHONPATH=src python -m harness.cli run --task examples/task.fan_out.json
 PYTHONPATH=src python -m harness.cli run --task examples/task.fan_out.json --models claude,gemini  # 이 실행만 후보 모델 오버라이드(codex 제외)
@@ -246,7 +246,7 @@ dashboard/failure_analysis/live_status → cli). CI 없는 프로젝트라 "린�
 검증**: `schemas.py`에 `from . import orchestrator`(역방향) 임시 추가 →
 테스트가 정확히 잡아내는 것 확인 후 원복.
 
-## 테스트 (386개, 전부 통과)
+## 테스트 (410개, 전부 통과)
 
 새 테스트 파일 추가/파일별 개수 변경 시 이 표도 같이 갱신(2026-07-24 문서
 감사에서 실제(239개)와 다른 옛 숫자(141개)로 오래 방치된 것 발견 —
