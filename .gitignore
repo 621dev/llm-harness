@@ -1,0 +1,31 @@
+# 이 파일은 scripts/sync_to_public.py가 생성한다 — 직접 수정하지 말 것.
+# (공개 저장소는 본 저장소의 스냅샷이라 매 동기화 때 덮어써진다.)
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Test / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# 하네스 실행 산출물(테스트/CLI 실행으로 재생성됨, 소스 아님)
+harness-mvp/_workspace/
+
+# 로컬 전용 자격증명
+.env
+.env.*
+*.env
+
+# OS
+.DS_Store
+Thumbs.db

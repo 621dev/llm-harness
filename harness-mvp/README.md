@@ -30,7 +30,7 @@ Phase 3 검증: mock 아님 — 실제 claude/codex CLI(구독) + Gemini REST AP
 cd harness-mvp
 pip install -e .[dev]                                     # pydantic + pytest 설치
 
-python -m pytest tests/ -v                                # 357개, 전부 mock — 실제 CLI/API 미호출
+python -m pytest tests/ -v                                # 362개, 전부 mock — 실제 CLI/API 미호출
 
 PYTHONPATH=src python -m harness.cli run --task examples/task.fan_out.json
 PYTHONPATH=src python -m harness.cli run --task examples/task.fan_out.json --models claude,gemini  # 이 실행만 후보 모델 오버라이드(codex 제외)
@@ -244,7 +244,7 @@ dashboard/failure_analysis/live_status → cli). CI 없는 프로젝트라 "린�
 검증**: `schemas.py`에 `from . import orchestrator`(역방향) 임시 추가 →
 테스트가 정확히 잡아내는 것 확인 후 원복.
 
-## 테스트 (357개, 전부 통과)
+## 테스트 (362개, 전부 통과)
 
 새 테스트 파일 추가/파일별 개수 변경 시 이 표도 같이 갱신(2026-07-24 문서
 감사에서 실제(239개)와 다른 옛 숫자(141개)로 오래 방치된 것 발견 —
@@ -280,6 +280,7 @@ dashboard/failure_analysis/live_status → cli). CI 없는 프로젝트라 "린�
 | `test_quota_fallback_provider.py` | 5 | `QuotaFallbackProvider`(2026-07-27) — quota 오류 시 2차 provider로 전환, quota 아닌 실패는 그대로 전파(폴백 안 함), 성공 시 폴백 안 건드림, **폴백 시 `auth_mode`가 답한 쪽을 따라가는지**(안 그러면 구독 호출이 `subscription_calls`에서 누락, 2026-07-28 회귀 방지) |
 | `test_provider_contract.py` | 6 | **Provider 구현체 전체의 공통 계약**(2026-07-29) — 리플렉션으로 구현체를 찾아 등록표 누락/잔재를 잡고(새 구현체가 조용히 빠지는 것 방지), `auth_mode` 유효값, 정체성 필드, **실패가 `ProviderError`인지**(재시도 분류가 이 계약에 하중을 걸고 있다). API 키 환경변수를 비워서 키 있는 머신에서도 실제 호출이 안 나가게 한다 |
 | `test_budget_limit.py` | 11 | **run 예산 상한**(2026-07-29) — 상한 없으면 기존 동작 그대로, 상한 도달 시 다음 호출을 시작하지 않음(provider 호출 횟수로 확인), 금액/구독 호출이 서로 다른 자원임, 실패한 시도도 예산을 깎음, fan-out이 남은 provider를 건너뜀, refinement가 라운드를 조기 종료하고 **partial로 산출물 보존**. `0.09+0.01 < 0.10` 부동소수점 때문에 상한을 지나치던 구현 버그를 이 테스트가 잡았다 |
+| `test_sync_to_public_script.py` | 5 | **공개 저장소 동기화**(2026-07-29, 실제 사고로 추가) — 미러에 `.gitignore`가 없어 `pytest` 후 `add -A` 했을 때 .pyc 62개가 커밋된 사고 재발 방지. 동기화 시 `.gitignore`가 생성되는지, **git이 실제로 .pyc를 무시하는지**(문자열 검사가 아니라 `git status`로), 생성된 .gitignore가 본 저장소 것의 복사본이 아닌지(주석의 도메인 관련 표현 차단), `domains/` 제외가 유지되는지. 스크립트가 저장소 루트에 있어 공개 미러에서는 skip된다 |
 
 ```bash
 python -m pytest tests/ -v
