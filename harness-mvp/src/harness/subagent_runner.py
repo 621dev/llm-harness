@@ -69,9 +69,45 @@ _CONTINUATION_INSTRUCTION_TEMPLATE = (
 )
 
 
+# 역할별 직무 설명 (2026-07-29, "회사 부서 모방" 검토에서 추가).
+#
+# **왜 필요했나**: 지시문이 "당신의 역할은 '{role}'입니다"뿐이라 **역할 이름 자체가
+# 유일한 설명**이었다. `research`/`design_review`처럼 이름이 자기설명적인 역할은
+# 그럭저럭 동작했지만, `compliance_review`/`editing`처럼 해석 여지가 넓은 부서명으로는
+# 부서가 이름만 다르고 하는 일은 같아진다.
+#
+# **기존 역할은 일부러 비워뒀다.** 여기 없으면 지금까지와 똑같은 지시문이 나가므로,
+# 2차 측정까지 쌓인 체인 동작이 안 바뀐다(측정 비교 대상이 흔들리면 안 된다).
+# 새 부서만 설명을 받는다 — 새 역할이 값을 내는지 보는 게 목적이라, 기존 역할까지
+# 같이 바꾸면 무엇 때문에 결과가 달라졌는지 구분할 수 없다.
+_ROLE_BRIEFS: dict[str, str] = {
+    "drafting": (
+        "조사 결과를 바탕으로 읽을 수 있는 초안을 씁니다. 완벽하게 다듬는 건 다음 "
+        "단계 담당이니, 구조와 내용을 채우는 데 집중하세요."
+    ),
+    "compliance_review": (
+        "규정·안전·정책 관점에서만 검토합니다. 문장력이나 구성은 다른 담당자 몫이니 "
+        "지적하지 마세요. 위험하거나 사실과 다를 수 있는 서술, 근거 없는 단정, 지켜야 "
+        "할 절차 누락을 찾아 근거와 함께 적으세요."
+    ),
+    "editing": (
+        "내용은 바꾸지 않고 문장과 형식만 정리합니다. 새 정보를 넣거나 판단을 "
+        "추가하지 마세요 — 중복 제거, 용어 통일, 문장 다듬기, 제목 체계 정리까지가 "
+        "당신의 범위입니다."
+    ),
+}
+
+
 def _apply_role_instruction(role: str, content: str, *, is_first_step: bool) -> str:
     template = _FIRST_STEP_INSTRUCTION_TEMPLATE if is_first_step else _CONTINUATION_INSTRUCTION_TEMPLATE
-    return template.format(role=role, content=content)
+    instruction = template.format(role=role, content=content)
+    brief = _ROLE_BRIEFS.get(role)
+    if brief is None:
+        return instruction
+    # 직무 설명을 역할 이름 바로 뒤에 끼운다 — 요청/이전 결과 본문보다 앞에 와야
+    # 지시로 읽힌다(learning.apply_to_prompt가 참고 자료를 앞에 두는 것과 같은 이유).
+    marker = f"당신의 역할은 '{role}'입니다."
+    return instruction.replace(marker, f"{marker} {brief}", 1)
 
 
 def delegate(
@@ -187,6 +223,11 @@ def _render_step_markdown(step: DelegationStep, candidate: Candidate) -> str:
         f"# Chain Step {step.role} ({step.provider_id})\n\n"
         f"- model_id: {candidate.model_id}\n"
         f"- status: {candidate.status}\n"
+        # 입력 토큰을 남기는 이유(2026-07-29): 체인은 스텝마다 이전 결과를 전부 받아
+        # 입력이 계단식으로 커진다(실측 3단계에서 direct_call의 90배 이상). 스텝별로
+        # 안 남기면 "요약 전달이 필요한 시점"을 추측으로 판단하게 된다.
+        # `- latency_ms:`는 본문 시작 판정 기준(_STEP_META_LAST_FIELD)이므로 그 앞에 넣는다.
+        f"- input_tokens: {candidate.input_tokens}\n"
         f"- tokens: {candidate.tokens}\n"
         f"- latency_ms: {candidate.latency_ms}\n\n"
         f"{candidate.content}\n"

@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Literal, Optional, Sequence
+from typing import Literal, Optional
 
 from providers.base import Provider
 
@@ -45,6 +45,7 @@ from . import (
     learning,
     synthesizer,
 )
+from . import finalization
 from .budget import BudgetTracker
 from .schemas import Approval, DelegationStep, Observation, Plan, RefinementRound, RunMetrics, TaskInput
 
@@ -324,7 +325,7 @@ def _run_direct_call(task: TaskInput, providers: dict[str, Provider], run_dir: P
         if candidate.status == "success"
         else [{"stage": "direct_call", "message": f"재시도까지 실패: {candidate.content}"}]
     )
-    return _finalize(
+    return finalization.finalize(
         run_dir,
         candidate.content,
         errors=errors,
@@ -373,8 +374,8 @@ def _run_fan_out_judge(
 
     successful = [c for c in candidates if c.status == "success"]
     completed, failed = len(successful), len(candidates) - len(successful)
-    latency_ms = _sum_optional_int(c.latency_ms for c in candidates)
-    cost_usd = _sum_optional_float(c.cost_usd for c in candidates)
+    latency_ms = finalization.sum_optional_int(c.latency_ms for c in candidates)
+    cost_usd = finalization.sum_optional_float(c.cost_usd for c in candidates)
     subscription_calls = sum(c.subscription_calls for c in candidates)
 
     if len(successful) < MIN_CANDIDATES:
@@ -384,7 +385,7 @@ def _run_fan_out_judge(
                 "message": f"성공한 후보가 {len(successful)}개로 min_candidates({MIN_CANDIDATES}) 미만",
             }
         )
-        return _finalize_without_output(
+        return finalization.finalize_without_output(
             run_dir, errors=errors, latency_ms=latency_ms, cost_usd=cost_usd,
             subscription_calls=subscription_calls, completed=completed, failed=failed
         )
@@ -393,7 +394,7 @@ def _run_fan_out_judge(
         judging = judge.evaluate(candidates, plan.rubric, judge_provider, budget=budget)
     except judge.JudgeError as exc:
         errors.append({"stage": "judge", "message": str(exc)})
-        return _finalize_without_output(
+        return finalization.finalize_without_output(
             run_dir, errors=errors, latency_ms=latency_ms, cost_usd=cost_usd,
             subscription_calls=subscription_calls, completed=completed, failed=failed
         )
@@ -401,10 +402,10 @@ def _run_fan_out_judge(
     run_store.write_json(run_dir, "judging.json", judging.model_dump(mode="json"))
     final_content = synthesizer.synthesize(candidates, judging)
     # judge 호출 자체의 지연/비용도 합산한다 (Cost Blindness 방지, ADR 0004).
-    total_latency_ms = _sum_optional_int([latency_ms, judging.latency_ms])
-    total_cost_usd = _sum_optional_float([cost_usd, judging.cost_usd])
+    total_latency_ms = finalization.sum_optional_int([latency_ms, judging.latency_ms])
+    total_cost_usd = finalization.sum_optional_float([cost_usd, judging.cost_usd])
 
-    return _finalize(
+    return finalization.finalize(
         run_dir, final_content, errors=errors, latency_ms=total_latency_ms, cost_usd=total_cost_usd,
         subscription_calls=subscription_calls + judging.subscription_calls,
         completed=completed, failed=failed, stage="fan_out_judge",
@@ -420,17 +421,18 @@ def _run_hierarchical_delegation(
     executed_steps = plan.delegation_chain[: len(observations)]
     completed = sum(1 for step in executed_steps if step.status == "success")
     failed = sum(1 for step in executed_steps if step.status == "error")
-    latency_ms = _sum_optional_int(step.latency_ms for step in executed_steps)
-    cost_usd = _sum_optional_float(step.cost_usd for step in executed_steps)
+    latency_ms = finalization.sum_optional_int(step.latency_ms for step in executed_steps)
+    cost_usd = finalization.sum_optional_float(step.cost_usd for step in executed_steps)
     subscription_calls = sum(step.subscription_calls for step in executed_steps)
 
     if not chain_completed:
-        return _finalize_partial_chain(
-            run_dir, executed_steps, latency_ms=latency_ms, cost_usd=cost_usd,
+        return finalization.finalize_partial_chain(
+            run_dir, executed_steps, _render_chain_final(run_dir, executed_steps),
+            latency_ms=latency_ms, cost_usd=cost_usd,
             subscription_calls=subscription_calls, completed=completed, failed=failed
         )
 
-    return _finalize(
+    return finalization.finalize(
         run_dir, _render_chain_final(run_dir, executed_steps), errors=[],
         latency_ms=latency_ms, cost_usd=cost_usd,
         subscription_calls=subscription_calls, completed=completed,
@@ -547,8 +549,8 @@ def _run_iterative_refinement(
                 content=candidate.content,
                 passed=verdict.passed,
                 feedback=verdict.feedback,
-                latency_ms=_sum_optional_int([candidate.latency_ms, verdict.latency_ms]),
-                cost_usd=_sum_optional_float([candidate.cost_usd, verdict.cost_usd]),
+                latency_ms=finalization.sum_optional_int([candidate.latency_ms, verdict.latency_ms]),
+                cost_usd=finalization.sum_optional_float([candidate.cost_usd, verdict.cost_usd]),
                 subscription_calls=candidate.subscription_calls + verdict.subscription_calls,
             )
         )
@@ -561,17 +563,17 @@ def _run_iterative_refinement(
     run_store.write_json(run_dir, "refinement.json", [r.model_dump(mode="json") for r in rounds])
 
     failed = 1 if generation_failed else 0
-    latency_ms = _sum_optional_int(latency_parts)
-    cost_usd = _sum_optional_float(cost_parts)
+    latency_ms = finalization.sum_optional_int(latency_parts)
+    cost_usd = finalization.sum_optional_float(cost_parts)
 
     if last_content is None:
-        return _finalize_without_output(
+        return finalization.finalize_without_output(
             run_dir, errors=errors, latency_ms=latency_ms, cost_usd=cost_usd,
             subscription_calls=subscription_calls, completed=0, failed=failed
         )
 
     if passed:
-        return _finalize(
+        return finalization.finalize(
             run_dir, last_content, errors=errors, latency_ms=latency_ms, cost_usd=cost_usd,
             subscription_calls=subscription_calls,
             completed=generated_count, failed=failed, stage="iterative_refinement",
@@ -585,7 +587,7 @@ def _run_iterative_refinement(
                 "message": f"라운드 상한({MAX_REFINEMENT_ROUNDS}회)까지 rubric을 통과하지 못함",
             }
         )
-    return _finalize(
+    return finalization.finalize(
         run_dir, last_content, errors=errors, latency_ms=latency_ms, cost_usd=cost_usd,
         subscription_calls=subscription_calls,
         completed=generated_count, failed=failed, stage="iterative_refinement_partial",
@@ -622,7 +624,7 @@ def _run_agentic_task(
     if budget.exhausted:
         # 에이전트는 턴 상한까지 여러 번 호출하므로 시작 자체를 막는다 — 중간에
         # 끊으면 파일을 쓰다 만 상태가 남는다.
-        return _finalize_without_output(
+        return finalization.finalize_without_output(
             run_dir,
             errors=[{"kind": "budget", "stage": "agentic_task", "message": budget.reason}],
             latency_ms=None,
@@ -644,7 +646,7 @@ def _run_agentic_task(
         # 에이전트가 시작조차 못 한 경우(바이너리 없음/타임아웃 등). 다른 패턴의
         # "재시도까지 실패" 경로와 달리 재시도하지 않는다 — 부분적으로 파일을
         # 쓰다 만 상태에서 처음부터 다시 실행하면 같은 작업을 두 번 하게 된다.
-        return _finalize_without_output(
+        return finalization.finalize_without_output(
             run_dir,
             errors=[{"stage": "agentic_task", "message": f"에이전트 실행 실패: {exc}"}],
             latency_ms=None,
@@ -677,7 +679,7 @@ def _run_agentic_task(
     if not result.produced_files and result.stop_reason != "completed":
         # 남긴 것도 없고 정상 종료도 아니면 승격할 결과 자체가 없다
         # (체인이 첫 단계부터 실패한 경우와 같은 처리).
-        return _finalize_without_output(
+        return finalization.finalize_without_output(
             run_dir, errors=errors, latency_ms=result.latency_ms, cost_usd=result.cost_usd,
             subscription_calls=result.subscription_calls, completed=0, failed=1
         )
@@ -688,7 +690,7 @@ def _run_agentic_task(
     produced_texts = agent_runner.read_produced_texts(workspace, result.produced_files)
 
     is_partial = result.stop_reason != "completed"
-    return _finalize(
+    return finalization.finalize(
         run_dir,
         _render_agent_report(result),
         errors=errors,
@@ -754,200 +756,14 @@ def _build_refinement_prompt(original_prompt: str, previous_content: str, feedba
     )
 
 
-def _finalize_partial_chain(
-    run_dir: Path,
-    executed_steps: list[DelegationStep],
-    *,
-    latency_ms: Optional[int],
-    cost_usd: Optional[float],
-    subscription_calls: int = 0,
-    completed: int,
-    failed: int,
-) -> Observation:
-    """Section 6: 체인 중단 시 마지막 성공 스텝을 partial final로 승격.
-
-    partial로 승격되는 내용도 실제로 final.md에 쓰이는 출력이므로, Safety 체크를 절대
-    생략하지 않는다(Section 12.1: "Safety 체크는 어떤 경로에서도 생략하지 않는다") —
-    실제 검사/보류 로직은 `_finalize()`에 위임해서 두 경로(정상 완주/partial)가
-    Safety 처리를 중복 구현하지 않게 한다.
-    """
-    failed_step = executed_steps[-1]
-    last_success = next((s for s in reversed(executed_steps[:-1]) if s.status == "success"), None)
-
-    errors = [
-        {
-            "stage": f"chain step '{failed_step.role}'",
-            "message": f"재시도까지 실패해 체인 중단 (provider={failed_step.provider_id})",
-        }
-    ]
-
-    if last_success is None:
-        run_store.write_json(
-            run_dir,
-            "metrics.json",
-            RunMetrics(
-                latency_ms=latency_ms or 0,
-                completed_candidates_or_steps=completed,
-                failed_candidates_or_steps=failed,
-                estimated_cost_usd=cost_usd,
-                subscription_calls=subscription_calls,
-            ).model_dump(mode="json"),
-        )
-        run_store.write_json(run_dir, "errors.json", errors)
-        return Observation(
-            status="error",
-            summary=f"체인이 첫 단계('{failed_step.role}')부터 실패해 승격할 결과가 없음",
-            artifacts=["errors.json"],
-            next_actions=["ask_user"],
-        )
-
-    # 성공한 스텝을 전부 엮는다 — 정상 완주 경로와 같은 구성 규칙을 쓴다
-    # (마지막 성공 스텝만 올리면 그 앞 단계의 산출물이 final.md에서 사라진다).
-    return _finalize(
-        run_dir, _render_chain_final(run_dir, executed_steps), errors=errors,
-        latency_ms=latency_ms, cost_usd=cost_usd,
-        subscription_calls=subscription_calls,
-        completed=completed, failed=failed, stage="hierarchical_delegation_partial",
-        content_prefix="(partial) ",
-        success_summary=(
-            f"체인이 '{failed_step.role}' 단계에서 중단됨 — 그 앞까지 성공한 단계"
-            f"({completed}개) 결과를 partial로 승격"
-        ),
-    )
 
 
-def _finalize_without_output(
-    run_dir: Path,
-    *,
-    errors: list[dict[str, str]],
-    latency_ms: Optional[int],
-    cost_usd: Optional[float],
-    subscription_calls: int = 0,
-    completed: int,
-    failed: int,
-) -> Observation:
-    """final.md 없이 종료한다 (예: fan_out_judge min_candidates 미달)."""
-    run_store.write_json(run_dir, "errors.json", errors)
-    run_store.write_json(
-        run_dir,
-        "metrics.json",
-        RunMetrics(
-            latency_ms=latency_ms or 0,
-            completed_candidates_or_steps=completed,
-            failed_candidates_or_steps=failed,
-            estimated_cost_usd=cost_usd,
-            subscription_calls=subscription_calls,
-        ).model_dump(mode="json"),
-    )
-    reason = errors[-1]["message"] if errors else "알 수 없는 이유로 출력이 생성되지 않음"
-    return Observation(status="error", summary=reason, artifacts=["errors.json"], next_actions=["ask_user"])
 
 
-def _finalize(
-    run_dir: Path,
-    final_content: str,
-    *,
-    errors: list[dict[str, str]],
-    latency_ms: Optional[int],
-    cost_usd: Optional[float],
-    subscription_calls: int = 0,
-    completed: int,
-    failed: int,
-    stage: str,
-    content_prefix: str = "",
-    success_summary: Optional[str] = None,
-    extra_scan_texts: Sequence[str] = (),
-) -> Observation:
-    """Safety 체크(항상 실행) 후 final.md/metrics.json/errors.json을 기록한다.
-
-    errors에는 개별 후보/스텝이 재시도까지 실패한 기록이 담겨있을 수 있다 — run 전체가
-    성공하더라도 그 실패 기록은 지우지 않고 그대로 errors.json에 남긴다 (DoD 요구사항).
-
-    Safety 체크가 실패하면 즉시 차단하지 않고 사람 검토 대기 상태로 멈춘다(Phase 4
-    Release Gate, `_enter_safety_review` 참고) — content_prefix(예: "(partial) ")는
-    검토 후 공개될 때도 그대로 남아있어야 하므로, Safety 체크 전에 미리 적용해서
-    저장해둔다.
-
-    extra_scan_texts: final.md 본문 외에 추가로 스캔할 텍스트(agentic_task가 생성한
-    파일 내용). 이 패턴은 진짜 산출물이 텍스트가 아니라 파일이라, 파일을 안 보면
-    "Safety는 어떤 경로에서도 생략하지 않는다"(Section 12.1)가 형해화된다. 기본값이
-    비어 있어 나머지 세 패턴의 동작은 그대로다.
-    """
-    formatted_content = f"{content_prefix}{final_content.rstrip()}\n"
-    safety_obs = _check_safety(formatted_content, extra_scan_texts)
-    run_store.write_markdown(
-        run_dir, "safety.md", f"# Safety Check\n\n- status: {safety_obs.status}\n\n{safety_obs.summary}\n"
-    )
-
-    metrics = RunMetrics(
-        latency_ms=latency_ms or 0,
-        completed_candidates_or_steps=completed,
-        failed_candidates_or_steps=failed,
-        estimated_cost_usd=cost_usd,
-        subscription_calls=subscription_calls,
-    )
-    run_store.write_json(run_dir, "metrics.json", metrics.model_dump(mode="json"))
-
-    if safety_obs.status == "error":
-        return _enter_safety_review(run_dir, formatted_content, errors=errors, safety_obs=safety_obs)
-
-    run_store.write_json(run_dir, "errors.json", errors)
-    run_store.write_markdown(run_dir, "final.md", formatted_content)
-    # 여기서만 학습을 기록한다(2026-07-29). Safety 검토 대기로 빠진 run은 아직 끝난 게
-    # 아니라(resume으로 이어짐) 기록하면 이중 계상된다. 실패해도 run을 망가뜨리지 않게
-    # 감싼다 — 학습은 부가 기능인데 그것 때문에 완성된 산출물을 잃으면 배보다 배꼽이 크다.
-    try:
-        learning.record_run(run_dir)
-    except Exception as exc:  # noqa: BLE001 - 학습 실패가 run 실패가 되면 안 된다
-        errors = [*errors, {"stage": "learning", "message": f"학습 기록 실패(run은 정상): {exc}"}]
-        run_store.write_json(run_dir, "errors.json", errors)
-
-    status = "warning" if errors else "success"
-    summary = success_summary or (
-        f"{stage} run 완료" + (f" (경고 {len(errors)}건 — 나머지로 계속 진행함)" if errors else "")
-    )
-    return Observation(status=status, summary=summary, artifacts=["final.md"], next_actions=["continue"])
 
 
-def _check_safety(content: str, extra_scan_texts: Sequence[str]) -> Observation:
-    """final.md 본문과 추가 대상(agentic_task 생성 파일)을 모두 스캔해 하나의 판정으로 합친다.
-
-    스캔을 나눠서 하는 이유: 파일들을 그냥 이어붙여 한 번에 검사하면 어느 파일이
-    걸렸는지 알 수 없어 사람 검토(safety_review.json의 note)가 무의미해진다.
-    """
-    observations = [safety.check(content)] + [safety.check(text) for text in extra_scan_texts]
-    failures = [obs for obs in observations if obs.status == "error"]
-    if not failures:
-        return observations[0]
-
-    return Observation(
-        status="error",
-        summary="; ".join(obs.summary for obs in failures),
-        artifacts=[],
-        next_actions=["ask_user"],
-    )
 
 
-def _enter_safety_review(
-    run_dir: Path, content: str, *, errors: list[dict[str, str]], safety_obs: Observation
-) -> Observation:
-    """Safety 체크 실패 시 즉시 차단하는 대신 "검토 대기" 상태로 멈춘다 (Phase 4 Release Gate).
-
-    승인 체크포인트(Approval)와 같은 pending/approved/rejected 상태 모델을 재사용한다.
-    보류된 내용은 final.md가 아니라 pending_review_content.md에 저장해서, 검토 전까지는
-    final.md 자체가 존재하지 않게 한다("출력이 아직 없다"는 걸 파일 존재 여부로도
-    명확히 드러냄).
-    """
-    run_store.write_markdown(run_dir, "pending_review_content.md", content)
-    review = Approval(status="pending", note=safety_obs.summary)
-    run_store.write_json(run_dir, "safety_review.json", review.model_dump(mode="json"))
-    run_store.write_json(run_dir, "errors.json", errors + [{"stage": "safety", "message": safety_obs.summary}])
-    return Observation(
-        status="warning",
-        summary=f"Safety 점검 실패 — 사람 검토 대기 중 (run_id={run_dir.name})",
-        artifacts=["safety.md", "pending_review_content.md"],
-        next_actions=["ask_user"],
-    )
 
 
 def _apply_learned_notes(task: TaskInput, run_dir: Path) -> TaskInput:
@@ -977,11 +793,5 @@ def _write_plan(run_dir: Path, plan: Plan) -> None:
     )
 
 
-def _sum_optional_int(values: Iterable[Optional[int]]) -> Optional[int]:
-    present = [v for v in values if v is not None]
-    return sum(present) if present else None
 
 
-def _sum_optional_float(values: Iterable[Optional[float]]) -> Optional[float]:
-    present = [v for v in values if v is not None]
-    return round(sum(present), 6) if present else None

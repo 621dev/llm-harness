@@ -26,6 +26,11 @@ gaebalai/claude-code-orchestrator, jikime/harness-lab) + 하네스 기본 개념
 
 - `harness-repo-summary-beginner-ko.md` — 비개발자용
 - `harness-repo-summary-technical-ko.md` — 개발 경험자용
+- `harness-vs-ecc-decision-2026-07-ko.md` — **현재 구조 유지 vs ECC 전환 판단
+  (2026-07-29).** 결론: 전환하지 않되, "엔진 유지 vs 폐기"가 아니라 **패턴별로**
+  유지 여부를 판단한다. 측정된 것/안 된 것을 구분한 게 핵심 — `fan_out_judge`는
+  기계 장치가 가장 많은데 **비교 측정이 0회**다. 3차/4차 측정의 결정 기준(임계값)과
+  "그래도 전환이 맞는 경우" 4가지 포함
 - `harness-ecc-reanalysis-2026-07-ko.md` — **`affaan-m/ECC` 재분석(2026-07-29).**
   구조가 성숙한 뒤 같은 레포를 다시 읽고 적용할 것만 골랐다. 채택 2건(재시도
   오류 분류 결함 수정, Provider 계약 테스트), 보류 1건(예산 상한 — 비용 직결),
@@ -80,8 +85,10 @@ gaebalai/claude-code-orchestrator, jikime/harness-lab) + 하네스 기본 개념
 (`src/harness/`, `tests/`, `pyproject.toml`, `README.md`).
 
 **구조 결정 기록(ADR)은 코드 옆에 있다** — `../harness-mvp/docs/adr/`
-(`0001`~`0008`). "왜 이 구조인가"를 이 문서 폴더가 아니라 거기서 찾을 것:
+(`0001`~`0009`). "왜 이 구조인가"를 이 문서 폴더가 아니라 거기서 찾을 것:
 0001 팀 패턴 분기, 0002 Safety 릴리스 게이트, 0003 Debate/Consensus 도입 보류,
 0004 Judge를 실제 LLM 판단으로 승격, 0005 공유 엔진 + 독립 도메인 폴더,
 0006 `iterative_refinement`, 0007 `agentic_task`(자율 에이전트를 감싸는 하네스),
-0008 체인 최종 산출물을 마지막 스텝이 아니라 성공한 모든 스텝으로 구성.
+0008 체인 최종 산출물을 마지막 스텝이 아니라 성공한 모든 스텝으로 구성,
+0009 `hierarchical_delegation`을 키워드 자동 라우팅에서 빼고 opt-in으로 강등
+(네 번 측정해서 우위 미입증 + 비용 1.5~3.2배).

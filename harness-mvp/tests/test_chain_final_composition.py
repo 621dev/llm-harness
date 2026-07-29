@@ -50,7 +50,12 @@ class ChainFinalCompositionTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp_dir, ignore_errors=True)
 
     def run_chain_task(self, task_id: str, **kwargs) -> tuple[Path, str]:
-        task = TaskInput(task_id=task_id, prompt=_RESEARCH_PROMPT)
+        # ADR 0009(2026-07-29)로 체인이 opt-in 전용이 됐다 — 프롬프트 키워드만으로는
+        # fan_out_judge로 간다. 이 테스트가 검증하는 건 체인의 최종 산출물 구성이므로
+        # 명시적으로 진입시킨다.
+        task = TaskInput(
+            task_id=task_id, prompt=_RESEARCH_PROMPT, constraints=["team_pattern:hierarchical_delegation"]
+        )
         orchestrator.run(task, delegation_providers(**kwargs), root=self.tmp_dir)
         run_dir = self.tmp_dir / f"run-{task_id}"
         return run_dir, run_store.read_markdown(run_dir, "final.md")

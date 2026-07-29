@@ -1,0 +1,8 @@
+{
+  "task_id": "departments-demo",
+  "prompt": "사내 신규 입사자용 서버 접근 권한 신청 절차 안내서를 만들어줘. 신청 경로, 승인 단계, 보안 주의사항을 포함해줘.",
+  "constraints": [
+    "team_pattern:hierarchical_delegation",
+    "delegation_roles:research,drafting,compliance_review,editing,content_finalization"
+  ]
+}

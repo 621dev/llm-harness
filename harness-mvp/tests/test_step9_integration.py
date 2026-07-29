@@ -181,7 +181,8 @@ class HierarchicalDelegationIntegrationTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp_dir, ignore_errors=True)
 
     def test_full_run_creates_all_dod_files(self) -> None:
-        task = make_task("delegation-demo", "경쟁사 A/B/C의 가격 정책을 리서치해줘")
+        # ADR 0009(2026-07-29)로 체인은 opt-in 전용 — 키워드만으로는 fan_out_judge로 간다.
+        task = make_task("delegation-demo", "경쟁사 A/B/C의 가격 정책을 리서치해줘", ["team_pattern:hierarchical_delegation"])
 
         observation = orchestrator.run(task, delegation_providers(), root=self.tmp_dir)
 
@@ -196,8 +197,8 @@ class HierarchicalDelegationIntegrationTest(unittest.TestCase):
 
     def test_mid_chain_failure_promotes_partial_result(self) -> None:
         task = make_task(
-            "delegation-mid-fail", "설계 리뷰 결과를 반영해서 순차 검토를 진행해줘"
-        )  # -> sequential_review: design_review -> implementation_review
+            "delegation-mid-fail", "설계 리뷰 결과를 반영해서 순차 검토를 진행해줘", ["team_pattern:hierarchical_delegation"]
+        )  # -> sequential_review: design_review -> implementation_review (ADR 0009: opt-in 필요)
         providers = delegation_providers(fail_times={"implementation_review-mock": 2})
 
         observation = orchestrator.run(task, providers, root=self.tmp_dir)
@@ -222,6 +223,7 @@ class HierarchicalDelegationIntegrationTest(unittest.TestCase):
         task = make_task(
             "delegation-partial-unsafe",
             "설계 리뷰 결과를 반영해서 순차 검토를 진행해줘. 주민등록번호 예시를 포함해서 검토해줘.",
+            ["team_pattern:hierarchical_delegation"],  # ADR 0009: 체인 진입은 opt-in
         )
         providers = delegation_providers(fail_times={"implementation_review-mock": 2})
 

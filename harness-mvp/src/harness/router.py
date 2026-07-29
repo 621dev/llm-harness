@@ -20,9 +20,23 @@ _TRIVIAL_KEYWORDS = (
 
 # Section 5의 team_pattern 결정 표를 키워드 매칭으로 구현한 것. 순서가 우선순위다
 # (예: "설계 리뷰"는 "설계"보다 먼저 검사해야 sequential_review로 분류된다).
+#
+# **`hierarchical_delegation`은 이 표에 없다** (2026-07-29, ADR 0009로 강등).
+# 네 번 측정해서 한 번도 `direct_call` 대비 우위를 입증하지 못했고, 결함 없는 4차
+# 측정에서는 세 조건이 전부 만점인데 체인이 1.5배(3역할)~3.2배(5역할) 비쌌다.
+# 품질 차이가 관측되지 않는 경로를 **기본값**으로 두는 것은 적합성 게이트 철학
+# ("이득이 없으면 비용을 지불하지 않는다", Section 12.1)과 모순이다.
+#
+# 패턴은 삭제하지 않았다 — `constraints: ["team_pattern:hierarchical_delegation"]`
+# opt-in으로 진입한다(ADR 0006/0007과 같은 방식). 측정이 프롬프트 1종·k=3이라
+# 다른 유형에서 값이 날 가능성은 열어둔다.
+#
+# `task_type`은 유지한다(`research`/`sequential_review`) — rubric 선택과
+# `delegation_chain` 구성이 여기 묶여 있어서, 없애면 opt-in으로 들어온 체인이
+# 기본 rubric으로 떨어진다.
 _TASK_TYPE_RULES: list[tuple[tuple[str, ...], str, TeamPattern]] = [
-    (("설계 리뷰", "구현 리뷰", "단계적 검토", "순차 검토"), "sequential_review", "hierarchical_delegation"),
-    (("리서치", "조사", "research"), "research", "hierarchical_delegation"),
+    (("설계 리뷰", "구현 리뷰", "단계적 검토", "순차 검토"), "sequential_review", "fan_out_judge"),
+    (("리서치", "조사", "research"), "research", "fan_out_judge"),
     (("설계", "아키텍처", "architecture"), "architecture design", "fan_out_judge"),
     (("작성해줘", "써줘", "콘텐츠", "content"), "content generation", "fan_out_judge"),
 ]

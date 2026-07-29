@@ -29,6 +29,9 @@ import unittest
 from pathlib import Path
 
 _HARNESS_PACKAGE_DIR = Path(__file__).resolve().parents[1] / "src" / "harness"
+# 크기 감시는 harness/만이 아니라 src/ 전체를 본다 — providers/evals/fetchers도 같은
+# 방식으로 자랄 수 있고, 계층 허용표와 달리 크기는 패키지를 가릴 이유가 없다.
+_SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 
 _ALLOWED_INTERNAL_IMPORTS: dict[str, set[str]] = {
     "__init__": set(),
@@ -41,6 +44,9 @@ _ALLOWED_INTERNAL_IMPORTS: dict[str, set[str]] = {
     # learning은 run 산출물을 읽고 쓰기만 한다 — 어떤 패턴이 돌았는지, 누가
     # 호출했는지는 모른다(orchestrator가 끝난 run을 넘겨준다).
     "learning": {"run_store", "schemas"},
+    # finalization은 run 종료 경로(Safety -> metrics -> final.md). 어떤 패턴이 돌았는지는
+    # 모르고, orchestrator가 결과를 넘겨준다 — 그래서 orchestrator를 import하지 않는다.
+    "finalization": {"learning", "run_store", "safety", "schemas"},
     "router": {"schemas"},
     "safety": {"schemas"},
     "synthesizer": {"schemas"},
@@ -52,6 +58,7 @@ _ALLOWED_INTERNAL_IMPORTS: dict[str, set[str]] = {
     "orchestrator": {
         "agent_runner",
         "budget",
+        "finalization",
         "learning",
         "judge",
         "live_status",
@@ -115,6 +122,56 @@ class ArchitectureLayerTest(unittest.TestCase):
             if extra:
                 violations.append(f"{module_name}.py가 허용 안 된 모듈을 import함: {sorted(extra)}")
         self.assertEqual(violations, [], "\n".join(violations))
+
+
+class ModuleSizeGuardTest(unittest.TestCase):
+    """모듈이 조용히 god 모듈로 자라는 것을 잡는다 (2026-07-29 추가).
+
+    **왜 필요했나**: 계층 테스트는 "누가 누구를 import하나"만 보고 **"한 모듈이 얼마나
+    많은 일을 하나"는 안 본다.** 그 갭 때문에 `orchestrator.py`가 3주에
+    367 → 987줄로(2.7배) 자란 걸 아무 테스트도 알려주지 않았다. 실측으로 확인한
+    증가 패턴은 선형이 아니라 **패턴/기능이 늘 때마다 계단식**이다(패턴 핸들러 하나가
+    100~130줄).
+
+    "다음에 크면 나눠야지"를 사람 기억에 맡기면 이미 늦는다 — 넘는 순간 실패하게 해서
+    그 시점을 놓치지 않게 한다. 이 검사는 5ms 정도로 전체 스위트의 0.1% 미만이다.
+
+    상한을 넘으면 할 일: **패턴 핸들러/공용 경로를 별 모듈로 분리**한다. 상한을
+    올리는 건 답이 아니다(그러면 이 테스트가 하는 일이 없어진다). 다만 폐기 검토 중인
+    코드는 분리 대상에서 빼는 게 규칙이다(`docs/00_작업규칙` 참고).
+    """
+
+    # 1,200줄: 2026-07-29 현재 최대가 orchestrator.py 987줄이라 여유를 두되,
+    # 다음 팀 패턴(핸들러 100~130줄)이 추가되면 걸리도록 잡았다.
+    MAX_LINES = 1_200
+
+    def test_no_module_exceeds_the_size_limit(self) -> None:
+        oversized = [
+            f"{path.relative_to(_SRC_DIR)} {len(path.read_text(encoding='utf-8').splitlines())}줄"
+            for path in sorted(_SRC_DIR.rglob("*.py"))
+            if len(path.read_text(encoding="utf-8").splitlines()) > self.MAX_LINES
+        ]
+        self.assertEqual(
+            oversized,
+            [],
+            f"모듈이 {self.MAX_LINES}줄을 넘었다: {oversized}. "
+            f"상한을 올리지 말고 분리할 것 — 상한을 올리면 이 테스트가 하는 일이 없어진다.",
+        )
+
+    def test_limit_is_not_already_met_by_accident(self) -> None:
+        """상한이 현실과 동떨어지지 않았는지 — 너무 높으면 경고가 영원히 안 온다.
+
+        가장 큰 모듈이 상한의 절반도 안 되면 상한이 사실상 없는 것이므로, 그때는
+        상한을 내려 감시가 계속 유효하게 유지한다.
+        """
+        largest = max(len(p.read_text(encoding="utf-8").splitlines()) for p in _SRC_DIR.rglob("*.py"))
+
+        self.assertGreater(
+            largest,
+            self.MAX_LINES // 2,
+            f"가장 큰 모듈이 {largest}줄로 상한({self.MAX_LINES})의 절반 미만이다 — "
+            f"상한을 낮춰서 감시가 계속 유효하게 할 것.",
+        )
 
 
 class ExtractInternalImportsTest(unittest.TestCase):

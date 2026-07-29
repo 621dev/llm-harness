@@ -26,8 +26,8 @@ def _judge_provider() -> MockProvider:
     return MockProvider(ProviderConfig(provider_id="judge", model_id="judge-mock"), profile="judge")
 
 
-def make_task(task_id: str, prompt: str) -> TaskInput:
-    return TaskInput(task_id=task_id, prompt=prompt)
+def make_task(task_id: str, prompt: str, constraints: list[str] | None = None) -> TaskInput:
+    return TaskInput(task_id=task_id, prompt=prompt, constraints=constraints or [])
 
 
 def reliable_fan_out_providers(_attempt_index: int) -> dict[str, MockProvider]:
@@ -137,7 +137,10 @@ class RunnerTest(unittest.TestCase):
         똑같이 채점되고 pass@k가 계산되는지 확인한다."""
         case = EvalCase(
             name="delegation-reliable",
-            task=make_task("eval-delegation", "경쟁사 A/B/C의 가격 정책을 리서치해줘"),
+            # ADR 0009로 체인은 opt-in 전용이다.
+            task=make_task(
+                "eval-delegation", "경쟁사 A/B/C의 가격 정책을 리서치해줘", ["team_pattern:hierarchical_delegation"]
+            ),
         )
 
         report = runner.run_case_k_times(case, reliable_delegation_providers, k=2, root=self.tmp_dir)

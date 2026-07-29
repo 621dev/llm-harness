@@ -90,7 +90,12 @@ class MetricsAggregationTest(unittest.TestCase):
         return run_store.read_json(self.tmp_dir / run_id, "metrics.json")
 
     def test_hierarchical_delegation_sums_chain_steps(self) -> None:
-        task = TaskInput(task_id="sub-chain", prompt="NCP XX를 조사해줘. 그 다음 검토해줘.")
+        # ADR 0009로 체인은 opt-in 전용이다(키워드만으로는 fan_out_judge).
+        task = TaskInput(
+            task_id="sub-chain",
+            prompt="NCP XX를 조사해줘. 그 다음 검토해줘.",
+            constraints=["team_pattern:hierarchical_delegation"],
+        )
         providers = {
             "research-mock": _StubProvider("research-mock", auth_mode="cli_subscription"),
             "design_review-mock": _StubProvider("design_review-mock", auth_mode="cli_subscription"),
@@ -107,7 +112,12 @@ class MetricsAggregationTest(unittest.TestCase):
 
     def test_mixed_auth_modes_count_only_subscription(self) -> None:
         """같은 run 안에 종량제와 구독이 섞여 있으면 구독분만 세야 한다."""
-        task = TaskInput(task_id="sub-mixed", prompt="NCP XX를 조사해줘. 그 다음 검토해줘.")
+        # ADR 0009로 체인은 opt-in 전용이다(키워드만으로는 fan_out_judge).
+        task = TaskInput(
+            task_id="sub-mixed",
+            prompt="NCP XX를 조사해줘. 그 다음 검토해줘.",
+            constraints=["team_pattern:hierarchical_delegation"],
+        )
         providers = {
             "research-mock": _StubProvider("research-mock", auth_mode="api_key"),
             "design_review-mock": _StubProvider("design_review-mock", auth_mode="cli_subscription"),

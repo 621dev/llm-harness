@@ -47,6 +47,38 @@ def make_two_step_chain(*, fail_times: dict[str, int] | None = None):
     return steps, providers
 
 
+class RoleBriefTest(unittest.TestCase):
+    """역할별 직무 설명 (2026-07-29, "회사 부서 모방" 검토에서 추가).
+
+    지시문이 "당신의 역할은 '{role}'입니다"뿐이라 **역할 이름이 유일한 설명**이었다.
+    `compliance_review`/`editing`처럼 해석 여지가 넓은 부서명으로는 부서가 이름만
+    다르고 하는 일은 같아진다.
+    """
+
+    def test_new_role_gets_its_job_description(self) -> None:
+        instruction = subagent_runner._apply_role_instruction(
+            "compliance_review", "본문", is_first_step=False
+        )
+
+        self.assertIn("규정·안전·정책 관점", instruction)
+        # 설명이 역할 이름 바로 뒤에 와야 지시로 읽힌다 — 본문보다 앞
+        self.assertLess(instruction.index("규정·안전·정책"), instruction.index("본문"))
+
+    def test_existing_roles_are_left_unchanged(self) -> None:
+        """기존 역할까지 설명을 붙이면 2차 측정까지 쌓인 체인 동작이 바뀌어,
+        무엇 때문에 결과가 달라졌는지 구분할 수 없게 된다."""
+        for role in ("research", "design_review", "implementation_review", "content_finalization"):
+            with self.subTest(role=role):
+                instruction = subagent_runner._apply_role_instruction(role, "본문", is_first_step=True)
+                self.assertIn(f"당신의 역할은 '{role}'입니다. 아래 요청", instruction)
+
+    def test_briefs_only_cover_known_roles(self) -> None:
+        """어휘에 없는 역할에 설명이 달려 있으면 죽은 설정이다."""
+        from harness import planner
+
+        self.assertEqual(set(subagent_runner._ROLE_BRIEFS) - planner.KNOWN_DELEGATION_ROLES, set())
+
+
 class SubagentRunnerTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp_dir = Path(tempfile.mkdtemp(prefix="harness-test-"))

@@ -38,9 +38,22 @@ class FitnessGateTest(unittest.TestCase):
 
 
 class TeamPatternClassificationTest(unittest.TestCase):
-    def test_research_keyword_classified(self) -> None:
+    def test_research_keyword_routes_to_fan_out_not_chain(self) -> None:
+        """ADR 0009(2026-07-29): 리서치 키워드가 더 이상 체인으로 자동 진입하지 않는다.
+
+        네 번 측정해서 체인이 direct_call 대비 우위를 입증하지 못했고, 결함 없는 4차
+        측정에서 세 조건이 전부 만점인데 체인이 1.5~3.2배 비쌌다. 품질 차이가 없는
+        경로를 **기본값**으로 두는 것은 적합성 게이트 철학과 모순이다.
+        `task_type`은 유지한다 — rubric/체인 구성이 여기 묶여 있다.
+        """
         result = router.classify_team_pattern(make_task("경쟁사 가격 정책을 리서치해줘"))
-        self.assertEqual(result, ("research", "hierarchical_delegation"))
+        self.assertEqual(result, ("research", "fan_out_judge"))
+
+    def test_no_keyword_routes_to_hierarchical_delegation(self) -> None:
+        """강등 회귀 방지: 어떤 키워드로도 체인에 자동 진입해선 안 된다(opt-in 전용)."""
+        for keywords, _task_type, pattern in router._TASK_TYPE_RULES:
+            with self.subTest(keywords=keywords[0]):
+                self.assertNotEqual(pattern, "hierarchical_delegation")
 
     def test_architecture_keyword_classified(self) -> None:
         result = router.classify_team_pattern(make_task("이 설계안을 검토해줘"))

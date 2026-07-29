@@ -60,10 +60,17 @@ SUPPORTED_PATTERNS = (
 DEFAULT_PATTERN = "hierarchical_delegation"
 
 # 키워드 자동 라우팅이 없어 `constraints`의 "team_pattern:<이름>" opt-in으로만
-# 진입하는 패턴(ADR 0006/0007). 고비용이거나 되돌리기 어려운 부수 효과가 있어
-# 실수로 걸리면 안 되기 때문에 planner가 일부러 자동 분류에서 빼놨다 — 그래서
-# 이 스크립트가 task json에 제약을 직접 넣어줘야 한다.
-_OPT_IN_PATTERNS = frozenset({"iterative_refinement", "agentic_task"})
+# 진입하는 패턴. 고비용이거나 되돌리기 어려운 부수 효과가 있어 실수로 걸리면 안 되기
+# 때문에 planner가 일부러 자동 분류에서 빼놨다 — 그래서 이 스크립트가 task json에
+# 제약을 직접 넣어줘야 한다.
+#
+# - iterative_refinement/agentic_task: 도입 시점부터 opt-in (ADR 0006/0007)
+# - hierarchical_delegation: **2026-07-29 강등**(ADR 0009). 네 번 측정해서 direct_call
+#   대비 우위를 입증하지 못했고, 결함 없는 4차 측정에서 세 조건이 전부 만점인데 체인이
+#   1.5배(3역할)~3.2배(5역할) 비쌌다. 품질 차이가 없는 경로를 기본값으로 둘 수 없다.
+_OPT_IN_PATTERNS = frozenset(
+    {"iterative_refinement", "agentic_task", "hierarchical_delegation"}
+)
 
 # ncp-snapshot-drill/centos-eol-migration에서 실제 e2e로 검증한 조합을 그대로
 # 기본값으로 쓴다(harness-mvp/config.json의 delegation_role_models와 동일).
@@ -151,8 +158,8 @@ def render_config_json(pattern: str = DEFAULT_PATTERN) -> dict[str, Any]:
 def render_task_json(task_id: str, prompt: str, pattern: str = DEFAULT_PATTERN) -> dict[str, Any]:
     """opt-in 전용 패턴이면 `constraints`에 team_pattern override를 넣어준다.
 
-    이걸 빠뜨리면 프롬프트 내용과 무관하게 fan_out_judge로 폴백된다 — 이 두
-    패턴은 planner가 일부러 키워드 자동 라우팅에서 빼놨기 때문이다.
+    이걸 빠뜨리면 프롬프트 내용과 무관하게 fan_out_judge로 폴백된다 — 이 패턴들은
+    planner가 일부러 키워드 자동 라우팅에서 빼놨기 때문이다(`_OPT_IN_PATTERNS` 참고).
     """
     constraints = [f"team_pattern:{pattern}"] if pattern in _OPT_IN_PATTERNS else []
     return {"task_id": task_id, "prompt": prompt, "constraints": constraints}

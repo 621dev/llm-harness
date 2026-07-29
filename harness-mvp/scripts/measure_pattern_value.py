@@ -68,7 +68,7 @@ PROMPT = (
 )
 # planner._DEFAULT_RUBRICS["research"]와 동일 — 체인 조건에서 planner가 고르는
 # rubric을 단일 조건에도 똑같이 적용해 판정 기준을 통일한다.
-RUBRIC = ["출처 신뢰성", "핵심 정보 커버리지"]
+RUBRIC = ["핵심 정보 커버리지", "구체성"]
 
 
 # 쓸 수 있는 백엔드. gemini는 종량제(비용이 $로 보임), claude/codex는 구독
@@ -176,6 +176,11 @@ def run_direct(attempt: int) -> dict:
         "cost_usd": candidate.cost_usd,
         "subscription_calls": candidate.subscription_calls,
         "llm_calls": 1,
+        "roles": [],
+        # 체인 조건과 같은 키로 남긴다 — direct의 입력 토큰이 **증폭의 기준선**이라,
+        # 이게 없으면 "체인이 몇 배 쓰는가"를 계산할 수 없다(2026-07-29 mock 검증에서
+        # direct만 이 키가 없어 비교가 불완전한 걸 발견).
+        "step_input_tokens": [candidate.input_tokens],
     }
 
 
@@ -187,18 +192,33 @@ def run_direct(attempt: int) -> dict:
 _CHAIN_ROLE_PROVIDER_IDS = tuple(f"{role}-mock" for role in cli_module._DELEGATION_ROLES)
 
 
-def run_chain(attempt: int, root: Path) -> dict:
-    """조건 B: orchestrator를 통해 hierarchical_delegation 체인 실행(역할 전부 같은 백엔드)."""
+# 조건 C(부서형 체인)의 역할 구성. 2026-07-29 `delegation_roles:` override로 추가됐다 —
+# **역할을 3개에서 5개로 늘리는 것 자체에 값이 있는지**를 보는 조건이다. 3단계 체인이
+# 2차 측정에서 direct_call과 동률이었으므로, 여기서도 동률이면 "역할 세분화로는 값이
+# 안 나온다"가 되고 DAG 패턴(분업 병렬/분기)을 만들 근거가 사라진다.
+DEPARTMENT_ROLES = ("research", "drafting", "compliance_review", "editing", "content_finalization")
+
+
+def run_chain(attempt: int, root: Path, *, roles: tuple[str, ...] | None = None, label: str = "chain") -> dict:
+    """조건 B/C: orchestrator를 통해 hierarchical_delegation 실행(역할 전부 같은 백엔드).
+
+    `roles`를 주면 `delegation_roles:` override로 그 부서 구성을 쓴다(조건 C).
+    안 주면 planner의 기본 체인 3단계(조건 B).
+    """
     providers: dict = {pid: _generator(pid) for pid in _CHAIN_ROLE_PROVIDER_IDS}
     providers[orchestrator.JUDGE_PROVIDER_KEY] = _evaluator("judge")
-    task = TaskInput(task_id=f"measure-chain-{attempt}", prompt=PROMPT)
+    constraints = (
+        ["team_pattern:hierarchical_delegation", f"delegation_roles:{','.join(roles)}"] if roles else []
+    )
+    task = TaskInput(task_id=f"measure-{label}-{attempt}", prompt=PROMPT, constraints=constraints)
     observation = orchestrator.run(task, providers, root=root)
-    run_dir = root / f"run-measure-chain-{attempt}"
+    run_dir = root / f"run-measure-{label}-{attempt}"
     ok = observation.status in ("success", "warning") and (run_dir / "final.md").exists()
     content = run_store.read_markdown(run_dir, "final.md") if ok else ""
     metrics = run_store.read_json(run_dir, "metrics.json")
+    plan = run_store.read_json(run_dir, "plan.json")
     return {
-        "condition": "chain",
+        "condition": label,
         "attempt": attempt,
         "ok": ok,
         "content": content,
@@ -206,12 +226,65 @@ def run_chain(attempt: int, root: Path) -> dict:
         "cost_usd": metrics["estimated_cost_usd"],
         "subscription_calls": metrics.get("subscription_calls", 0),
         # 체인 스텝 수 + evaluator 1회. 역할이 늘면 자동으로 반영된다.
-        "llm_calls": len(run_store.read_json(run_dir, "plan.json")["delegation_chain"]) + 1,
+        "llm_calls": len(plan["delegation_chain"]) + 1,
+        "roles": [step["role"] for step in plan["delegation_chain"]],
+        # 스텝별 입력 토큰 (2026-07-29). 체인은 스텝마다 이전 결과를 전부 받아 입력이
+        # 계단식으로 커진다 — 어디서 얼마나 커지는지 안 남기면 "요약 전달이 필요한
+        # 시점"을 추측으로 판단하게 된다.
+        "step_input_tokens": _step_input_tokens(run_dir, plan),
     }
 
 
+def _step_input_tokens(run_dir: Path, plan: dict) -> list[int | None]:
+    """스텝 파일 헤더의 `- input_tokens:` 값을 순서대로 뽑는다.
+
+    **`plan.json`의 `output_ref`를 쓰면 안 된다** — plan은 체인 실행 *전에* 저장되므로
+    거기 `output_ref`는 전부 null이다(실행 중 step 객체만 갱신된다). 파일명 규칙으로
+    직접 구성한다(`run_store.chain_step_path`와 같은 규칙 — 2026-07-29 mock 검증에서
+    전부 None이 나와서 발견했다).
+
+    파싱 실패는 None으로 남기고 측정을 계속한다 — 부가 관측이 측정 자체를 죽이면
+    배보다 배꼽이 크다(`learning.record_run`과 같은 판단).
+    """
+    values: list[int | None] = []
+    for index, step in enumerate(plan["delegation_chain"], start=1):
+        try:
+            text = run_store.read_markdown(run_dir, f"artifacts/chain/step-{index}-{step['role']}.md")
+            line = next(ln for ln in text.splitlines() if ln.startswith("- input_tokens:"))
+            values.append(int(line.split(":", 1)[1].strip()))
+        except (OSError, KeyError, StopIteration, ValueError):
+            values.append(None)
+    return values
+
+
+# 측정할 수 있는 조건. 새 조건을 추가하려면 여기와 `_run_condition`만 손대면 된다.
+#
+# `fan_out`이 없는 게 눈에 띄어야 한다 — **기계 장치가 가장 많은 패턴
+# (judge + synthesizer + blind 익명화)이 비교 측정 0회다.** 별도 항목으로 남겨뒀다
+# (`docs/01_개념설명/harness-vs-ecc-decision-2026-07-ko.md` §6의 4차 측정).
+CONDITIONS = ("direct", "chain", "departments")
+
+
+# 조건별 시도당 LLM 호출 수(생성 + 판정 1회). 시작 전에 규모를 보여주기 위한 추정이다.
+_CALLS_PER_ATTEMPT = {"direct": 1 + 1, "chain": 3 + 1, "departments": len(DEPARTMENT_ROLES) + 1}
+
+
+def _estimate_total_calls(conditions: list[str], k: int) -> int:
+    return k * sum(_CALLS_PER_ATTEMPT.get(c, 0) for c in conditions)
+
+
+def _run_condition(label: str, attempt: int, chain_root: Path) -> dict:
+    if label == "direct":
+        return run_direct(attempt)
+    if label == "chain":
+        return run_chain(attempt, chain_root)
+    if label == "departments":
+        return run_chain(attempt, chain_root, roles=DEPARTMENT_ROLES, label="departments")
+    raise ValueError(f"알 수 없는 조건: {label!r} (사용 가능: {list(CONDITIONS)})")
+
+
 def evaluate(result: dict) -> dict:
-    """두 조건 공통 blind 판정 — evaluator는 조건 라벨을 모른다."""
+    """모든 조건 공통 blind 판정 — evaluator는 조건 라벨을 모른다."""
     if not result["ok"]:
         result.update({"passed": False, "feedback": "(실행 실패 — 판정 생략)", "eval_cost_usd": None})
         return result
@@ -245,7 +318,21 @@ def summarize(results: list[dict], condition: str) -> dict:
         "avg_run_cost_usd": round(sum(costs) / len(costs), 6) if costs else None,
         "total_subscription_calls": sum(r.get("subscription_calls", 0) for r in rows),
         "llm_calls_per_attempt": rows[0]["llm_calls"] if rows else None,
+        "roles": rows[0].get("roles") if rows else None,
+        # 입력 토큰 평균 (2026-07-29). 종량제 키에서는 입력도 실제 청구 대상이고,
+        # 체인은 스텝마다 이전 결과를 전부 받아 입력이 계단식으로 커진다 —
+        # 조건 간 입력 규모 차이를 여기서 바로 볼 수 있게 한다.
+        "avg_input_tokens": _avg_input_tokens(rows),
     }
+
+
+def _avg_input_tokens(rows: list[dict]) -> int | None:
+    per_attempt = [
+        sum(t for t in row["step_input_tokens"] if t is not None)
+        for row in rows
+        if row.get("step_input_tokens")
+    ]
+    return int(sum(per_attempt) / len(per_attempt)) if per_attempt else None
 
 
 def main() -> None:
@@ -259,7 +346,29 @@ def main() -> None:
         "--evaluator", default="auto", choices=sorted(_BACKENDS) + ["auto"],
         help="합격 판정에 쓸 백엔드 (기본 auto). 생성 모델과 다르게 두면 self-preference 완화",
     )
+    parser.add_argument(
+        "--conditions",
+        default="direct,chain",
+        help=(
+            f"측정할 조건, 콤마 구분 (사용 가능: {','.join(CONDITIONS)}). "
+            "기본 'direct,chain' — 1·2차 측정과 같은 조건이라 그대로 비교할 수 있다. "
+            "'departments'를 넣으면 5부서 체인까지 본다(호출이 시도당 6회 더 늘어난다)"
+        ),
+    )
+    parser.add_argument(
+        "--pace-seconds", type=int, default=None,
+        help=(
+            f"호출 간격(초). 기본은 백엔드에 따라 자동(gemini {PACE_SECONDS}초 / "
+            f"구독 {SUBSCRIPTION_PACE_SECONDS}초). gemini 종량제 키는 무료 티어보다 "
+            "속도 한도가 넉넉하므로 낮춰서 측정 시간을 줄일 수 있다 — 429가 나면 올릴 것"
+        ),
+    )
     args = parser.parse_args()
+
+    conditions = [c.strip() for c in args.conditions.split(",") if c.strip()]
+    unknown = [c for c in conditions if c not in CONDITIONS]
+    if unknown:
+        raise SystemExit(f"[fatal] 알 수 없는 조건: {unknown} (사용 가능: {list(CONDITIONS)})")
 
     global _GENERATOR_BACKEND, _EVALUATOR_BACKEND
     # auto면 시작 전에 gemini를 한 번 확인해서 백엔드를 정한다 — 호출마다 갈아타면
@@ -269,8 +378,14 @@ def main() -> None:
     resolved = _resolve_backend("auto") if "auto" in (args.generator, args.evaluator) else None
     _GENERATOR_BACKEND = resolved if args.generator == "auto" else args.generator
     _EVALUATOR_BACKEND = resolved if args.evaluator == "auto" else args.evaluator
-    pace = _pace_seconds()
-    print(f"generator={_GENERATOR_BACKEND} / evaluator={_EVALUATOR_BACKEND} / 호출 간격 {pace}초")
+    pace = args.pace_seconds if args.pace_seconds is not None else _pace_seconds()
+    print(
+        f"generator={_GENERATOR_BACKEND} / evaluator={_EVALUATOR_BACKEND} / "
+        f"호출 간격 {pace}초 / 조건 {conditions}"
+    )
+    # 호출 수를 미리 보여준다 — 종량제 키로 바뀐 뒤에는 "몇 번 부르는지"가 곧 금액이라,
+    # 시작 전에 규모를 알고 중단할 수 있어야 한다.
+    print(f"예상 LLM 호출: 약 {_estimate_total_calls(conditions, args.k)}회 (판정 포함)")
     if _uses_subscription():
         print("주의: 구독(claude/codex) 호출이라 $ 비용 대신 구독 한도를 소모한다.")
     print()
@@ -282,13 +397,14 @@ def main() -> None:
 
     results: list[dict] = []
     first = True
+    total_steps = args.k * len(conditions)
     for i in range(1, args.k + 1):
-        for label, runner in (("direct", lambda: run_direct(i)), ("chain", lambda: run_chain(i, chain_runs_root))):
+        for label in conditions:
             if not first:
                 time.sleep(pace)  # free tier 롤링 윈도우 한도 회피 (위 주석)
             first = False
             print(f"[{i}/{args.k}] {label} 실행 중...")
-            result = runner()
+            result = _run_condition(label, i, chain_runs_root)
             time.sleep(pace)
             results.append(evaluate(result))
 
@@ -299,7 +415,7 @@ def main() -> None:
             if any(w.used_fallback for w in _FALLBACK_WRAPPERS):
                 print(
                     f"\n[중단] gemini가 측정 도중 응답하지 못해 claude로 대체됐다"
-                    f" (진행 {len(results)}/{args.k * 2}회).\n"
+                    f" (진행 {len(results)}/{total_steps}회).\n"
                     "        조건마다 모델이 달라져 비교가 성립하지 않으므로 결과를"
                     " 저장하지 않고 멈춘다.\n"
                     "        한 모델로 고정해 다시 돌릴 것:\n"
@@ -309,25 +425,30 @@ def main() -> None:
                 )
                 raise SystemExit(1)
 
-    summaries = [summarize(results, "direct"), summarize(results, "chain")]
+    summaries = [summarize(results, label) for label in conditions]
 
     print("\n## 결과 요약")
     for s in summaries:
         print(
             f"- {s['condition']}: 합격률 {s['pass_rate']}, 평균 지연 {s['avg_latency_ms']}ms, "
             f"평균 run 비용 ${s['avg_run_cost_usd']}, 시도당 호출 {s['llm_calls_per_attempt']}회"
+            + (f", 입력 토큰 평균 {s['avg_input_tokens']}" if s["avg_input_tokens"] else "")
             + (f", 구독 호출 누적 {s['total_subscription_calls']}회" if _uses_subscription() else "")
         )
     print("\n## 판정 상세 (조건/시도/합격 — 불합격 사유 앞부분)")
     for r in results:
         head = (r["feedback"] or "")[:120].replace("\n", " ")
-        print(f"- {r['condition']} #{r['attempt']}: passed={r['passed']} {head}")
+        # unmet_rubric_items가 비어 있는 불합격은 품질 신호가 아니라 판정 신뢰도 문제다
+        # (2026-07-29 judge 프롬프트 개편의 확인 지표).
+        flag = "" if r.get("passed") or r.get("unmet_rubric_items") else " [rubric 미지정!]"
+        print(f"- {r['condition']} #{r['attempt']}: passed={r['passed']}{flag} {head}")
 
     out_path = measure_root / f"pattern_value_{stamp}.json"
     out_path.write_text(
-        json.dumps({"prompt": PROMPT, "rubric": RUBRIC, "k": args.k,
+        json.dumps({"prompt": PROMPT, "rubric": RUBRIC, "k": args.k, "conditions": conditions,
                     "generator": _GENERATOR_BACKEND, "evaluator": _EVALUATOR_BACKEND,
                     "requested_generator": args.generator, "requested_evaluator": args.evaluator,
+                    "pace_seconds": pace,
                     "fallback_used": any(w.used_fallback for w in _FALLBACK_WRAPPERS),
                     "summaries": summaries, "results": results}, ensure_ascii=False, indent=2),
         encoding="utf-8",

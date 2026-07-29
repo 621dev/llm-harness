@@ -85,7 +85,14 @@ class Candidate(BaseModel):
 
     model_id: str
     content: str
+    # `tokens`는 **출력** 토큰이다(Gemini `candidatesTokenCount`). 이름이 애매하지만
+    # 기존 run 산출물과의 호환 때문에 유지하고, 입력은 별 필드로 둔다.
     tokens: Optional[int] = None
+    # 입력 토큰 (2026-07-29 추가). 그전까지 비용을 **출력 토큰만으로** 계산해서
+    # 체인처럼 입력이 큰 패턴의 비용이 과소 집계됐다 — 체인은 스텝마다 이전 결과를
+    # 통째로 받아 입력이 direct_call의 90배가 넘는데(실측) 그게 cost_usd에 전혀
+    # 반영되지 않았다. 종량제 키를 쓰면 입력도 실제 청구 대상이므로 따로 센다.
+    input_tokens: Optional[int] = None
     latency_ms: Optional[int] = None
     cost_usd: Optional[float] = None  # auth_mode="api_key" 일 때만 채움
     status: StepStatus = "success"

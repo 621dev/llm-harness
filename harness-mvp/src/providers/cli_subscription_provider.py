@@ -200,6 +200,26 @@ class ClaudeCliProvider(CliSubscriptionProvider):
         # hierarchical_delegation 역할 분담 실제 검증 중 발견: harness-mvp 자체를 프로젝트로
         # 인식해서 "git status에 cli.py 수정사항이 남아있는데..." 같은 응답을 반환함).
         # 격리된 빈 임시 디렉토리를 cwd로 줘서 CLAUDE.md/git 저장소를 못 찾게 막는다.
+        #
+        # ⚠️ **cwd 격리는 파일 유출만 막고, CLI 자체의 토큰 오버헤드는 그대로 붙는다**
+        # (2026-07-29 실측, `scripts/verify_claude_web_access.py`). 프롬프트가 6토큰인
+        # 호출에서 입력 합계가 **32,000~99,000토큰**으로 나왔다:
+        #
+        #     input_tokens 6 / cache_creation 10,246 / cache_read 89,096  (3턴 응답)
+        #     input_tokens 2 / cache_creation  9,324 / cache_read 23,194  (1턴 응답)
+        #
+        # 차이는 Claude Code의 시스템 프롬프트·도구 정의다. 즉 우리는 "단발 텍스트
+        # 완성"으로 쓰고 있지만 **실제로는 에이전트 런타임을 매번 로드**한다. 캐시
+        # 읽기라 단가는 낮지만 구독 롤링 한도는 토큰으로 소모되고, claude 백엔드가
+        # gemini보다 느린 이유(측정에서 direct 조건이 260초로 타임아웃)의 설명이기도 하다.
+        #
+        # `--bare`로 줄일 수 있을 것처럼 보이지만 **쓸 수 없다** — OAuth/구독 인증까지
+        # 같이 꺼진다(모듈 docstring 참고). 줄일 방법이 확인되면 그때 적용할 항목이다.
+        #
+        # 부수 확인: 이 경로에 **웹 검색은 열려 있지 않다.** `--disallowedTools`를 안
+        # 걸었지만 `-p` 모드에서 닫혀 있고, 근거는 모델 자기보고가 아니라 API가 세는
+        # `usage.server_tool_use.web_search_requests == 0`이다. 그래서 rubric의
+        # "출처 신뢰성"이 어떤 백엔드로도 달성 불가라는 결론이 나왔다(planner.py 참고).
         with tempfile.TemporaryDirectory() as tmp_dir:
             result = subprocess.run(
                 [self._resolve_executable(), "--print", "--output-format", "json", "--input-format", "text"],

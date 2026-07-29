@@ -86,13 +86,17 @@ class ApiProvider(Provider):
         content, tokens = self._parse_response(payload)
         if not content:
             raise ProviderError(f"{self.provider_id} API 응답에 내용이 없음")
+        input_tokens = self._parse_input_tokens(payload)
 
         return Candidate(
             model_id=self.model_id,
             content=content,
             tokens=tokens,
+            input_tokens=input_tokens,
             latency_ms=latency_ms,
-            cost_usd=self._estimate_cost(tokens),  # api_key 모드는 cost_usd를 채운다
+            # api_key 모드는 cost_usd를 채운다. 입력 토큰도 함께 넘긴다(2026-07-29) —
+            # 그전까지 출력만 세서 체인처럼 입력이 큰 패턴의 비용이 과소 집계됐다.
+            cost_usd=self._estimate_cost(tokens, input_tokens),
             status="success",
         )
 
@@ -101,10 +105,14 @@ class ApiProvider(Provider):
         raise NotImplementedError
 
     def _parse_response(self, data: dict) -> tuple[str, Optional[int]]:
-        """(content, tokens)를 반환한다. 서브클래스가 구현."""
+        """(content, 출력 토큰)를 반환한다. 서브클래스가 구현."""
         raise NotImplementedError
 
-    def _estimate_cost(self, tokens: Optional[int]) -> Optional[float]:
+    def _parse_input_tokens(self, data: dict) -> Optional[int]:
+        """입력(프롬프트) 토큰 수. 응답에 없으면 None — 서브클래스가 구현."""
+        return None
+
+    def _estimate_cost(self, tokens: Optional[int], input_tokens: Optional[int] = None) -> Optional[float]:
         """대략적인 비용 추정치. 정확한 청구 금액은 각 서비스 콘솔에서 확인해야 한다."""
         return None
 
@@ -119,11 +127,20 @@ class GeminiApiProvider(ApiProvider):
     """Gemini REST API(`generateContent`)를 API 키로 직접 호출한다."""
 
     api_key_env_var = "GEMINI_API_KEY"
-    # gemini-2.5-flash 기준 대략적인 출력 토큰 단가(2026-07 시점, $2.50/1M output).
-    # candidatesTokenCount(출력 토큰)만 알 수 있어 출력 단가로만 추정한다 — 정확한
-    # 청구 금액이 아니라 러프한 추정치임을 명확히 하기 위해 필드명도 estimated_cost_usd
-    # 계열로 취급한다(RunMetrics와 동일한 관례).
+    # gemini-2.5-flash 기준 대략적인 토큰 단가(2026-07 시점). 정확한 청구 금액이 아니라
+    # 러프한 추정치임을 명확히 하려고 필드명도 estimated_cost_usd 계열로 쓴다.
+    #
+    # **입력 단가를 2026-07-29에 추가했다.** 그전까지 `candidatesTokenCount`(출력)만
+    # 세서, 체인처럼 **입력이 큰 패턴의 비용이 통째로 과소 집계**됐다 — 3단계 체인은
+    # 스텝마다 이전 결과를 전부 받아 입력이 direct_call의 90배가 넘는데(실측) 그게
+    # cost_usd에 0원으로 반영됐다. 종량제 키에서는 입력도 실제 청구 대상이고,
+    # `budget_usd` 상한이 이 값을 근거로 동작하므로 빠지면 상한이 헐거워진다.
+    #
+    # ⚠️ 단가는 콘솔에서 확인해 맞출 것 — 모델/티어에 따라 다르고, 여기 값은
+    # 코드가 원래 갖고 있던 출력 단가($2.50/1M)와 Flash 계열의 통상적인 입력:출력
+    # 비율을 근거로 둔 추정이다. 정확한 금액 관리가 필요하면 이 두 상수를 먼저 맞춘다.
     _COST_PER_OUTPUT_TOKEN_USD = 2.50 / 1_000_000
+    _COST_PER_INPUT_TOKEN_USD = 0.30 / 1_000_000
 
     def _build_request(self, api_key: str, prompt: str, temperature: float) -> tuple[str, dict, dict]:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_id}:generateContent"
@@ -144,7 +161,18 @@ class GeminiApiProvider(ApiProvider):
         tokens = data.get("usageMetadata", {}).get("candidatesTokenCount")
         return content, tokens
 
-    def _estimate_cost(self, tokens: Optional[int]) -> Optional[float]:
-        if tokens is None:
+    def _parse_input_tokens(self, data: dict) -> Optional[int]:
+        return data.get("usageMetadata", {}).get("promptTokenCount")
+
+    def _estimate_cost(self, tokens: Optional[int], input_tokens: Optional[int] = None) -> Optional[float]:
+        """출력 + 입력 토큰으로 추정한다.
+
+        둘 다 없으면 None(= 비용 미상). 한쪽만 있으면 있는 쪽만 계산한다 — 응답 형식이
+        바뀌어 한 필드가 사라져도 비용이 통째로 None이 되는 것보다 낫다(그러면
+        `budget_usd` 상한이 아무것도 못 막는다).
+        """
+        if tokens is None and input_tokens is None:
             return None
-        return round(tokens * self._COST_PER_OUTPUT_TOKEN_USD, 8)
+        cost = (tokens or 0) * self._COST_PER_OUTPUT_TOKEN_USD
+        cost += (input_tokens or 0) * self._COST_PER_INPUT_TOKEN_USD
+        return round(cost, 8)

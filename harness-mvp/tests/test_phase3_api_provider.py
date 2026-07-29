@@ -72,6 +72,55 @@ class GeminiApiProviderTest(unittest.TestCase):
 
         self.assertEqual(candidate.content, "안녕하세요")
 
+    @patch("providers.api_provider.requests.post")
+    def test_input_tokens_are_counted_into_cost(self, mock_post) -> None:
+        """입력 토큰이 비용에 반영되는지 (2026-07-29 수정한 누락).
+
+        그전까지 `candidatesTokenCount`(출력)만 세서, **체인처럼 입력이 큰 패턴의 비용이
+        통째로 과소 집계**됐다 — 3단계 체인은 스텝마다 이전 결과를 전부 받아 입력이
+        direct_call의 90배가 넘는데(실측) cost_usd에는 0원으로 반영됐다.
+        종량제 키에서는 입력도 실제 청구 대상이고, `budget_usd` 상한이 이 값을 근거로
+        동작하므로 빠지면 상한이 헐거워진다.
+        """
+        mock_post.return_value = make_response(
+            200,
+            {
+                "candidates": [{"content": {"parts": [{"text": "답"}]}}],
+                "usageMetadata": {"candidatesTokenCount": 100, "promptTokenCount": 10_000},
+            },
+        )
+
+        candidate = self.provider.generate("아주 긴 프롬프트")
+
+        self.assertEqual(candidate.input_tokens, 10_000)
+        # 출력 100토큰만 세면 무시할 금액인데, 입력 10,000토큰이 들어가면 훨씬 커진다
+        output_only = 100 * GeminiApiProvider._COST_PER_OUTPUT_TOKEN_USD
+        self.assertGreater(candidate.cost_usd, output_only)
+
+    @patch("providers.api_provider.requests.post")
+    def test_cost_survives_a_missing_token_field(self, mock_post) -> None:
+        """한 필드가 사라져도 비용이 통째로 None이 되면 budget 상한이 아무것도 못 막는다."""
+        mock_post.return_value = make_response(
+            200,
+            {
+                "candidates": [{"content": {"parts": [{"text": "답"}]}}],
+                "usageMetadata": {"promptTokenCount": 500},  # 출력 토큰 없음
+            },
+        )
+
+        candidate = self.provider.generate("질문")
+
+        self.assertIsNone(candidate.tokens)
+        self.assertIsNotNone(candidate.cost_usd)  # 있는 쪽만으로 계산한다
+
+    @patch("providers.api_provider.requests.post")
+    def test_cost_is_none_only_when_both_are_missing(self, mock_post) -> None:
+        mock_post.return_value = make_response(
+            200, {"candidates": [{"content": {"parts": [{"text": "답"}]}}], "usageMetadata": {}}
+        )
+
+        self.assertIsNone(self.provider.generate("질문").cost_usd)
+
     def test_missing_api_key_raises(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
             with self.assertRaises(ProviderError):

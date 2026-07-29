@@ -41,6 +41,10 @@ PYTHONPATH=src python -m harness.cli run --task examples/task.fan_out.json
 - 커밋/PR/merge는 매번 명시적 요청 시에만. `main` 직접 커밋 금지 — 브랜치 →
   PR → squash merge.
 - 자동 테스트는 실제 API/CLI 절대 미호출(모킹). 실제 연동은 기능당 1회 수동 확인.
+- 절제 원칙("필요할 때만 만든다")은 **기능**에만 적용. **구조 유지 보수(god 모듈
+  분리·중복 추출·죽은 코드 제거)는 트리거 없이 진행**한다 — 기다리는 비용이 복리로
+  늘기 때문(2026-07-29 개정). 단 동작 불변 + 테스트 무변경 통과, 구조/기능 커밋 분리,
+  폐기 검토 중인 코드는 제외. 선행 설계형 추상화는 여전히 트리거 필요.
 - phase/step 종료 시 전체 코드 재검토 + `docs/03_진행상황/*`, `harness-mvp/README.md`
   갱신.
 - GitHub: `621dev/multi-llm-harness`(private, 실제 개발). 구조만 공개한 미러는

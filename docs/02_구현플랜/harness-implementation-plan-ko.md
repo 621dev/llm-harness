@@ -212,8 +212,9 @@ Planner가 `team_pattern`을 정하는 기본 규칙(초기엔 LLM 호출 없이
 
 | task_type | team_pattern |
 | --- | --- |
-| research, investigation | hierarchical_delegation |
-| sequential_review (설계 리뷰 → 구현 리뷰 등 단계적 검토) | hierarchical_delegation |
+| research, investigation | fan_out_judge (2026-07-29 변경, ADR 0009) |
+| sequential_review (설계 리뷰 → 구현 리뷰 등 단계적 검토) | fan_out_judge (2026-07-29 변경, ADR 0009) |
+| (위 두 유형에서 체인을 쓰려면) | `constraints: ["team_pattern:hierarchical_delegation"]` opt-in |
 | architecture design, content generation, 비교가 필요한 작업 | fan_out_judge |
 | 분류 애매 | 기본값 fan_out_judge + ask_user로 확인 |
 

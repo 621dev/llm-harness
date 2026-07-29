@@ -81,6 +81,13 @@ class HarnessConfig(BaseModel):
       자동으로 쌓인다 — 끄는 건 반영 쪽뿐이다. 자동 집계
       (`learned/observations.jsonl`)는 애초에 주입되지 않는다: 사람이 읽고 판단해
       `learned.md`에 쓴 것만 반영된다("기록은 자동, 반영은 명시적").
+    - judge_fallback_model / candidate_fallback_model: judge와 fan_out 후보가 호출
+      한도로 실패할 때 전환할 2차 모델 (2026-07-29). null이면 폴백 없음(그전 동작).
+      체인 역할에만 있던 `delegation_role_fallback_models`를 이 두 자리로 확장한 것 —
+      judge가 종량제(gemini)였을 때는 한도가 사실상 안 말라 필요가 없었는데, judge를
+      구독(codex)으로 옮기면서 **한도가 마르면 fan_out run 전체가 실패**하는 경로가
+      생겼다. "claude 메인 / codex 서브 / gemini 보조(넘침 처리)" 구성의 '보조'가
+      실제로 동작하려면 이 두 자리에도 폴백이 필요하다.
     """
 
     candidate_models: list[str] = Field(default_factory=lambda: ["claude", "codex", "gemini"])
@@ -95,6 +102,8 @@ class HarnessConfig(BaseModel):
     budget_subscription_calls: Optional[int] = None
     agent_system_prompt: Optional[str] = None
     use_learned_notes: bool = True
+    judge_fallback_model: Optional[str] = None
+    candidate_fallback_model: Optional[str] = None
 
 
 def load_config(path: Path | None = None) -> HarnessConfig:

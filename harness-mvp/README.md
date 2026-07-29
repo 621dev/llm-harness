@@ -71,7 +71,7 @@ Windows PowerShell: `$env:PYTHONPATH="src"; python -m harness.cli run --task ...
   "max_subscription_candidates": 1,
   "max_refinement_rounds": 3,
   "max_agent_turns": 8,
-  "budget_usd": null,
+  "budget_usd": 0.05,
   "budget_subscription_calls": null,
   "agent_system_prompt": null,
   "use_learned_notes": true

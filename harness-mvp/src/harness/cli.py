@@ -84,14 +84,34 @@ _CANDIDATE_PROVIDER_REGISTRY: dict[str, Callable[[str], Provider]] = {
 # 이 문자열을 검증) 이름은 그대로 유지한다. content_finalization은 2026-07-27
 # planner.py의 _DEFAULT_DELEGATION_ROLES["research"]에 3번째 역할로 추가됨(세부는
 # 그쪽 주석 참고) — 여기 등록 안 하면 그 역할의 provider_id를 못 찾아 KeyError.
-_DELEGATION_ROLES = ("research", "design_review", "implementation_review", "content_finalization")
+#
+# 2026-07-29: drafting/compliance_review/editing 추가("회사 부서 모방" 검토).
+# **`planner.KNOWN_DELEGATION_ROLES`와 반드시 같아야 한다** — 여기는 provider를 등록하는
+# 곳이고 거기는 `delegation_roles:` override를 검증하는 곳이라, 한쪽에만 추가하면 그
+# 역할을 쓰는 순간 `providers["{role}-mock"]`에서 KeyError가 난다.
+# `test_step4_planner.py`가 두 목록의 일치를 검증한다.
+_DELEGATION_ROLES = (
+    "research",
+    "drafting",
+    "design_review",
+    "implementation_review",
+    "compliance_review",
+    "editing",
+    "content_finalization",
+)
 
 
-def _wrap_with_quota_fallback(role: str, primary_model: str, fallback_model: str | None) -> Provider:
-    """역할별 provider를 만든다. `fallback_model`이 있으면 1차가 호출 한도(quota)로
+def _wrap_with_quota_fallback(
+    provider_id: str, primary_model: str, fallback_model: str | None
+) -> Provider:
+    """provider 하나를 만든다. `fallback_model`이 있으면 1차가 호출 한도(quota)로
     실패할 때 2차로 자동 전환하는 `QuotaFallbackProvider`로 감싼다(2026-07-27,
-    `config.py`의 `delegation_role_fallback_models` 문서 참고)."""
-    provider_id = f"{role}-mock"
+    `config.py`의 `delegation_role_fallback_models` 문서 참고).
+
+    `provider_id`를 인자로 받는다(2026-07-29) — 처음엔 역할 전용이라 `f"{role}-mock"`을
+    안에서 만들었는데, 후보(`claude`)와 judge(`judge`)에도 폴백을 걸게 되면서 그 규칙이
+    맞지 않게 됐다. 호출부가 자기 키 규칙을 알고 있으니 그쪽에서 정한다.
+    """
     primary = _CANDIDATE_PROVIDER_REGISTRY[primary_model](provider_id)
     if fallback_model is None:
         return primary
@@ -129,18 +149,32 @@ def _default_providers(models: Sequence[str], config: HarnessConfig) -> dict[str
     fallback_models = config.delegation_role_fallback_models
     _validate_model_names([config.judge_model, config.delegation_model, *role_models.values(), *fallback_models.values()])
 
-    providers: dict[str, Provider] = {name: _CANDIDATE_PROVIDER_REGISTRY[name](name) for name in models}
+    _validate_model_names(
+        [m for m in (config.judge_fallback_model, config.candidate_fallback_model) if m is not None]
+    )
+
+    # 후보와 judge에도 quota 폴백을 걸 수 있다 (2026-07-29). 그전까지는 체인 역할에만
+    # 있었는데, 그건 judge가 종량제(gemini)라 사실상 한도가 안 마르는 상태였기 때문이다 —
+    # judge를 구독(codex)으로 옮기면서 **한도가 마르는 순간 fan_out run 전체가 실패**하는
+    # 경로가 생겼다. "claude 메인 / codex 서브 / gemini 보조(넘침 처리)" 구성의 '보조'가
+    # 실제로 동작하려면 이 두 자리에도 폴백이 필요하다.
+    providers: dict[str, Provider] = {
+        name: _wrap_with_quota_fallback(name, name, config.candidate_fallback_model)
+        for name in models
+    }
 
     providers.update(
         {
             f"{role}-mock": _wrap_with_quota_fallback(
-                role, role_models[role], fallback_models.get(role)
+                f"{role}-mock", role_models[role], fallback_models.get(role)
             )
             for role in _DELEGATION_ROLES
         }
     )
 
-    providers[orchestrator.JUDGE_PROVIDER_KEY] = _CANDIDATE_PROVIDER_REGISTRY[config.judge_model]("judge")
+    providers[orchestrator.JUDGE_PROVIDER_KEY] = _wrap_with_quota_fallback(
+        "judge", config.judge_model, config.judge_fallback_model
+    )
 
     # agentic_task 전용 에이전트 provider (ADR 0007). 모델 레지스트리를 안 거치고
     # claude로 고정한다 — codex는 stream 이벤트 형식이 달라 이번 범위 밖이고,

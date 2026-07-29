@@ -60,7 +60,8 @@ class CreateDomainTest(unittest.TestCase):
         task = json.loads((domain_dir / "examples" / "task.test-task.json").read_text(encoding="utf-8"))
         self.assertEqual(task["task_id"], "test-task")
         self.assertEqual(task["prompt"], "XX에 대해 조사해줘.")
-        self.assertEqual(task["constraints"], [])
+        # ADR 0009로 hierarchical_delegation이 opt-in이 되면서 기본 패턴도 제약을 받는다
+        self.assertEqual(task["constraints"], ["team_pattern:hierarchical_delegation"])
 
     def test_raises_if_domain_already_exists(self) -> None:
         new_domain.create_domain(
@@ -118,9 +119,11 @@ class OptInPatternScaffoldTest(unittest.TestCase):
     def test_keyword_routed_patterns_get_no_constraint(self) -> None:
         """자동 라우팅되는 패턴에까지 제약을 박아두면 프롬프트를 고쳐도 분류가
         안 바뀌어서, router 검증이라는 이 스크립트의 목적이 무력해진다."""
-        for pattern in ("hierarchical_delegation", "fan_out_judge"):
+        # ADR 0009(2026-07-29)로 hierarchical_delegation이 opt-in이 되면서, 키워드 자동
+        # 라우팅으로 진입하는 패턴은 fan_out_judge 하나만 남았다.
+        for pattern in ("fan_out_judge",):
             with self.subTest(pattern=pattern):
-                domain_dir = self.scaffold(pattern, prompt="XX를 조사해줘.")
+                domain_dir = self.scaffold(pattern, prompt="이 설계안을 검토해줘.")
                 task = json.loads(
                     (domain_dir / "examples" / "task.test-task.json").read_text(encoding="utf-8")
                 )
@@ -179,6 +182,8 @@ class VerifyDomainTest(unittest.TestCase):
             domain_dir, task_id="test-task", expected_pattern="hierarchical_delegation"
         )
 
+        # ADR 0009 이후에도 이 케이스는 통과한다 — 프롬프트 키워드가 아니라 스캐폴딩이
+        # 넣어준 `team_pattern:` 제약으로 체인에 진입하기 때문이다(그게 opt-in의 요점).
         self.assertEqual(result["team_pattern"], "hierarchical_delegation")
         self.assertEqual(result["task_type"], "research")
         self.assertTrue(result["pattern_matches_expected"])
@@ -188,10 +193,18 @@ class VerifyDomainTest(unittest.TestCase):
         )
 
     def test_prompt_without_routing_keywords_flags_mismatch(self) -> None:
+        """기대 패턴과 실제 분류가 어긋나면 불일치로 보고하는지.
+
+        **`fan_out_judge`로 스캐폴딩한다** — ADR 0009 이후 `hierarchical_delegation`은
+        opt-in이라 스캐폴딩이 `team_pattern:` 제약을 넣어주고, 그러면 프롬프트에 키워드가
+        없어도 체인으로 진입해서 "키워드가 없어 어긋난다"는 상황이 만들어지지 않는다.
+        제약이 안 붙는 패턴으로 만들어야 프롬프트 분류가 실제로 결과를 좌우한다.
+        """
         domain_dir = new_domain.create_domain(
             "test-domain",
             task_id="test-task",
             prompt="아무 키워드도 없는 평범한 요청 문장입니다 그냥 이렇게 길게만 써봄",
+            pattern="fan_out_judge",
             domains_root=self.tmp_dir,
         )
 
@@ -199,7 +212,7 @@ class VerifyDomainTest(unittest.TestCase):
             domain_dir, task_id="test-task", expected_pattern="hierarchical_delegation"
         )
 
-        self.assertEqual(result["team_pattern"], "fan_out_judge")
+        self.assertEqual(result["team_pattern"], "fan_out_judge")  # planner 기본값
         self.assertFalse(result["pattern_matches_expected"])
 
     def test_provider_registry_builds_without_error(self) -> None:

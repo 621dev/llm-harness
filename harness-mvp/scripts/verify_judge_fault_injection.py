@@ -12,11 +12,22 @@
 아니라 정확성으로 판단하는지 확인하려는 것이다(한쪽 방향만 확인하면 "항상
 짧은 쪽을 고른다"는 정반대 편향도 통과해버릴 수 있어서 양방향이 필요하다).
 
-사용법 (harness-mvp 디렉토리에서, GEMINI_API_KEY 필요):
-  PYTHONPATH=src python scripts/verify_judge_fault_injection.py
+**백엔드를 고를 수 있다**(2026-07-29 추가). judge 자리를 gemini에서 codex로 옮기려는
+검토 때문인데, codex를 judge 자리에서 돌린 적이 한 번도 없었다 — judge는 특정 JSON
+형식을 파싱해야 하므로(`judge._parse_*`) 형식을 지키는지 확인 없이 config만 바꾸면
+다음 run이 판정 파싱 실패로 죽는다.
+
+**`evaluate()`와 `check_pass()`를 모두 본다**: 전자는 fan_out_judge(후보 N개 비교),
+후자는 iterative_refinement/측정(단일 콘텐츠 합격 판정)이 쓰는 **다른 프롬프트·다른
+출력 형식**이다. 한쪽만 통과해도 다른 쪽이 깨질 수 있어 둘 다 검증한다.
+
+사용법 (harness-mvp 디렉토리에서):
+  PYTHONPATH=src python scripts/verify_judge_fault_injection.py            # gemini(기본)
+  PYTHONPATH=src python scripts/verify_judge_fault_injection.py --backend codex
 """
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -25,6 +36,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from harness import judge  # noqa: E402
 from harness.schemas import Candidate, ProviderConfig  # noqa: E402
 from providers.api_provider import GeminiApiProvider  # noqa: E402
+from providers.base import Provider  # noqa: E402
+from providers.cli_subscription_provider import ClaudeCliProvider, CodexCliProvider  # noqa: E402
+
+# cli.py의 `_CANDIDATE_PROVIDER_REGISTRY`와 같은 조합. 여기서 따로 만드는 이유는
+# 이 스크립트가 config.json과 무관하게 "특정 백엔드가 judge 자리에서 되는가"만
+# 보기 때문이다(config를 바꾸기 **전에** 확인하는 게 목적).
+_BACKENDS = {
+    "gemini": lambda: GeminiApiProvider(
+        ProviderConfig(provider_id="judge", model_id="gemini-2.5-flash", auth_mode="api_key")
+    ),
+    "claude": lambda: ClaudeCliProvider(
+        ProviderConfig(provider_id="judge", model_id="claude-cli", auth_mode="cli_subscription")
+    ),
+    "codex": lambda: CodexCliProvider(
+        ProviderConfig(provider_id="judge", model_id="codex-cli", auth_mode="cli_subscription")
+    ),
+}
+_BACKEND = "gemini"  # main()에서 --backend로 설정
 
 _CORRECT_ANSWER = "37 곱하기 4는 148입니다."
 # 오답(150)을 의도적으로 자연스럽게 숨긴다 — 판정 근거가 텍스트에 "계산
@@ -72,8 +101,36 @@ def _scores(judging) -> dict[str, float]:
     return {s.candidate: s.score for s in judging.scores}
 
 
-def _judge_provider() -> GeminiApiProvider:
-    return GeminiApiProvider(ProviderConfig(provider_id="judge", model_id="gemini-2.5-flash", auth_mode="api_key"))
+def _judge_provider() -> Provider:
+    return _BACKENDS[_BACKEND]()
+
+
+def _case_check_pass_rejects_wrong_content() -> tuple[bool, str]:
+    """`check_pass()` — 틀린 내용을 불합격시키는가 + 출력 형식을 지키는가.
+
+    `evaluate()`와 프롬프트·출력 형식이 다르다(`unmet_items`/`passed`/`feedback`).
+    judge 자리를 바꿀 때 이쪽이 깨지면 iterative_refinement와 측정이 같이 죽는다.
+    """
+    verdict = judge.check_pass(
+        _WRONG_BUT_ELABORATE, rubric=["정확성"], judge_provider=_judge_provider(),
+        request="37 곱하기 4가 얼마인지 계산 과정과 함께 알려줘.",
+    )
+    # 2026-07-29 개편으로 불합격에는 rubric 항목이 명시돼야 한다
+    passed = (not verdict.passed) and verdict.unmet_rubric_items == ["정확성"]
+    return passed, (
+        f"passed={verdict.passed}(기대 False), unmet={verdict.unmet_rubric_items}"
+        f"(기대 ['정확성']), feedback 앞부분={(verdict.feedback or '')[:60]!r}"
+    )
+
+
+def _case_check_pass_accepts_correct_content() -> tuple[bool, str]:
+    """반대 방향 — 맞는 내용을 통과시키는가(불합격만 잘하는 판정자도 쓸 수 없다)."""
+    verdict = judge.check_pass(
+        f"{_CORRECT_ANSWER} 계산: 37 x 4 = (30 x 4) + (7 x 4) = 120 + 28 = 148.",
+        rubric=["정확성"], judge_provider=_judge_provider(),
+        request="37 곱하기 4가 얼마인지 계산 과정과 함께 알려줘.",
+    )
+    return verdict.passed, f"passed={verdict.passed}(기대 True), unmet={verdict.unmet_rubric_items}"
 
 
 def main() -> int:
@@ -83,9 +140,21 @@ def main() -> int:
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
 
+    parser = argparse.ArgumentParser(description="judge_provider fault-injection 검증")
+    parser.add_argument(
+        "--backend", default="gemini", choices=sorted(_BACKENDS),
+        help="judge 자리에 앉힐 백엔드 (기본 gemini). config.json을 바꾸기 전에 확인용",
+    )
+    args = parser.parse_args()
+    global _BACKEND
+    _BACKEND = args.backend
+    print(f"judge 백엔드: {_BACKEND}\n")
+
     cases = {
-        "짧고 정확한 답 vs 길지만 틀린 답": _case_short_correct_beats_long_wrong,
-        "길지만 정확한 답 vs 짧고 틀린 답": _case_long_correct_beats_short_wrong,
+        "[evaluate] 짧고 정확한 답 vs 길지만 틀린 답": _case_short_correct_beats_long_wrong,
+        "[evaluate] 길지만 정확한 답 vs 짧고 틀린 답": _case_long_correct_beats_short_wrong,
+        "[check_pass] 틀린 내용을 불합격시키는가": _case_check_pass_rejects_wrong_content,
+        "[check_pass] 맞는 내용을 통과시키는가": _case_check_pass_accepts_correct_content,
     }
 
     all_passed = True

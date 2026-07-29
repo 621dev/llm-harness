@@ -149,6 +149,56 @@ class DefaultProvidersTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             cli._default_providers(_DEFAULT_CONFIG.candidate_models, config)
 
+    def test_judge_and_candidates_can_have_fallback(self) -> None:
+        """judge/후보 폴백 (2026-07-29).
+
+        그전까지 폴백은 **체인 역할에만** 있었다. judge가 종량제(gemini)라 한도가 사실상
+        안 마르는 상태였기 때문인데, judge를 구독(codex)으로 옮기면서 **한도가 마르면
+        fan_out run 전체가 실패**하는 경로가 생겼다 — "claude 메인 / codex 서브 /
+        gemini 보조(넘침 처리)" 구성의 '보조'가 실제로 동작하려면 이 두 자리에도 필요하다.
+        """
+        config = HarnessConfig(
+            judge_model="codex",
+            judge_fallback_model="gemini",
+            candidate_fallback_model="gemini",
+        )
+
+        providers = cli._default_providers(("claude", "codex"), config)
+
+        judge_provider = providers[orchestrator.JUDGE_PROVIDER_KEY]
+        self.assertIsInstance(judge_provider, QuotaFallbackProvider)
+        self.assertEqual(judge_provider.primary.model_id, "codex-cli")
+        self.assertEqual(judge_provider.fallback.model_id, "gemini-2.5-flash")
+        for name in ("claude", "codex"):
+            with self.subTest(candidate=name):
+                self.assertIsInstance(providers[name], QuotaFallbackProvider)
+                self.assertEqual(providers[name].fallback.model_id, "gemini-2.5-flash")
+
+    def test_judge_and_candidate_fallback_default_to_none(self) -> None:
+        """설정 안 하면 감싸지 않는다 — 기존 동작 회귀 방지."""
+        providers = cli._default_providers(("claude",), _DEFAULT_CONFIG)
+
+        self.assertNotIsInstance(providers[orchestrator.JUDGE_PROVIDER_KEY], QuotaFallbackProvider)
+        self.assertNotIsInstance(providers["claude"], QuotaFallbackProvider)
+
+    def test_unknown_judge_fallback_model_raises_value_error(self) -> None:
+        with self.assertRaises(ValueError):
+            cli._default_providers(("claude",), HarnessConfig(judge_fallback_model="made-up-model"))
+
+    def test_candidate_provider_id_is_not_suffixed(self) -> None:
+        """후보/judge의 `provider_id`에 `-mock`이 붙으면 안 된다.
+
+        폴백 헬퍼가 원래 역할 전용이라 `f"{role}-mock"`을 안에서 만들었다 —
+        후보·judge에 재사용하면서 그 규칙이 새어 나오면 run 산출물의 식별자가 오염된다.
+        """
+        config = HarnessConfig(judge_model="codex", judge_fallback_model="gemini",
+                               candidate_fallback_model="gemini")
+
+        providers = cli._default_providers(("claude",), config)
+
+        self.assertEqual(providers["claude"].provider_id, "claude")
+        self.assertEqual(providers[orchestrator.JUDGE_PROVIDER_KEY].provider_id, "judge")
+
 
 class LoadConfigTest(unittest.TestCase):
     def setUp(self) -> None:
