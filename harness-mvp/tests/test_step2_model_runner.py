@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from harness import model_runner, run_store  # noqa: E402
 from harness.schemas import ProviderConfig  # noqa: E402
+from providers.base import Provider, ProviderError  # noqa: E402
 from providers.mock import MockProvider  # noqa: E402
 
 
@@ -114,6 +115,106 @@ class ModelRunnerTest(unittest.TestCase):
 
         self.assertIsNone(candidates[0].cost_usd)
         self.assertIsNotNone(candidates[1].cost_usd)
+
+
+class RetryClassificationTest(unittest.TestCase):
+    """재시도가 무의미한 실패는 재시도하지 않는다 (2026-07-29, ECC 재분석에서 나온 결함 수정).
+
+    고치기 전: `except Exception`으로 전부 잡아 무조건 1회 재시도했다. 한도 초과(429)에
+    재시도를 얹으면 **이미 소진된 한도에 호출을 한 번 더 던지고**, 인증 실패에 얹으면
+    지연만 2배가 된다. Gemini 무료 티어 일 20회로 측정이 막힌 게 실제 경험이라 가장
+    아픈 자리에 낭비를 더하고 있었다.
+
+    판정은 발생 지점이 표시한 구조적 신호(`ProviderError.is_retryable`)만 본다 —
+    에러 메시지 문구 매칭은 이 프로젝트에서 이미 세 번 데인 방식이다.
+    """
+
+    def make_provider(self, *, auth_mode: str = "cli_subscription", **error_flags) -> object:
+        """지정한 플래그로 매번 실패하는 provider. 호출 횟수를 센다."""
+
+        class _AlwaysFailing(Provider):
+            def __init__(inner) -> None:  # noqa: N805 - 바깥 self와 구분하려고 inner
+                super().__init__(
+                    ProviderConfig(provider_id="p", model_id="p", auth_mode=auth_mode)
+                )
+                inner.calls = 0
+
+            def generate(inner, prompt: str, *, temperature: float = 0.7):  # noqa: N805
+                inner.calls += 1
+                raise ProviderError("실패 주입", **error_flags)
+
+        return _AlwaysFailing()
+
+    def test_quota_error_is_not_retried(self) -> None:
+        """핵심 회귀 방지: 소진된 한도에 두 번째 호출을 던지지 않는다."""
+        provider = self.make_provider(is_quota_error=True)
+
+        candidate = model_runner.generate_with_retry(provider, "질문")
+
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(candidate.status, "error")
+        # 실제로 소모한 만큼만 기록돼야 한다 — 예전엔 2회였다
+        self.assertEqual(candidate.subscription_calls, 1)
+
+    def test_auth_error_is_not_retried(self) -> None:
+        """키가 틀린 건 두 번 해도 틀리다."""
+        provider = self.make_provider(is_auth_error=True)
+
+        model_runner.generate_with_retry(provider, "질문")
+
+        self.assertEqual(provider.calls, 1)
+
+    def test_unflagged_failure_is_still_retried(self) -> None:
+        """일시적 실패로 볼 근거가 있는 것은 기존대로 재시도한다(동작 변경 아님)."""
+        provider = self.make_provider()
+
+        model_runner.generate_with_retry(provider, "질문")
+
+        self.assertEqual(provider.calls, model_runner.MAX_RETRIES + 1)
+
+    def test_non_provider_error_is_still_retried(self) -> None:
+        """ProviderError가 아닌 예외는 판단 근거가 없어 재시도한다 — 상한이 낭비를 막는다."""
+
+        class _Broken(Provider):
+            def __init__(inner) -> None:  # noqa: N805
+                super().__init__(ProviderConfig(provider_id="p", model_id="p"))
+                inner.calls = 0
+
+            def generate(inner, prompt: str, *, temperature: float = 0.7):  # noqa: N805
+                inner.calls += 1
+                raise RuntimeError("계약을 어긴 예외")
+
+        provider = _Broken()
+
+        candidate = model_runner.generate_with_retry(provider, "질문")
+
+        self.assertEqual(provider.calls, model_runner.MAX_RETRIES + 1)
+        self.assertEqual(candidate.status, "error")
+
+    def test_all_attempt_errors_are_kept(self) -> None:
+        """시도별 원인을 전부 남긴다 — 예전엔 덮어써서 1차 실패 원인이 사라졌다."""
+
+        class _DifferentEachTime(Provider):
+            def __init__(inner) -> None:  # noqa: N805
+                super().__init__(ProviderConfig(provider_id="p", model_id="p"))
+                inner.calls = 0
+
+            def generate(inner, prompt: str, *, temperature: float = 0.7):  # noqa: N805
+                inner.calls += 1
+                raise ProviderError(f"{inner.calls}번째 원인")
+
+        candidate = model_runner.generate_with_retry(_DifferentEachTime(), "질문")
+
+        self.assertIn("1번째 원인", candidate.content)
+        self.assertIn("2번째 원인", candidate.content)
+
+    def test_single_attempt_message_has_no_attempt_prefix(self) -> None:
+        """재시도가 없었으면 '1차:' 같은 접두어로 소음을 만들지 않는다."""
+        provider = self.make_provider(is_quota_error=True)
+
+        candidate = model_runner.generate_with_retry(provider, "질문")
+
+        self.assertNotIn("1차:", candidate.content)
 
 
 if __name__ == "__main__":

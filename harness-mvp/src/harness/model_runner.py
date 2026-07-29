@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from providers.base import Provider
+from providers.base import Provider, ProviderError
 
 from . import run_store
 from .schemas import Candidate
@@ -61,8 +61,17 @@ def generate_with_retry(provider: Provider, prompt: str, *, temperature: float =
     fan_out_judge(run_all)와 hierarchical_delegation(subagent_runner.delegate) 양쪽이
     공유하는 공통 복구 로직이라 이 모듈에 두고 재사용한다 — "1회 재시도, 무한 재시도
     금지"는 패턴과 무관한 공통 계약이기 때문이다.
+
+    **재시도가 무의미한 실패는 재시도하지 않는다**(2026-07-29, ECC 재분석에서 확인한
+    결함 수정). 한도 초과(429)에 재시도를 얹으면 이미 소진된 한도에 호출을 한 번 더
+    던지고, 인증 실패에 재시도를 얹으면 지연만 2배가 된다. 판정은 발생 지점이 표시한
+    `ProviderError.is_retryable`만 본다 — 여기서 에러 메시지를 다시 해석하지 않는다.
+
+    시도별 오류는 **전부** 남긴다. 예전엔 `last_error`로 덮어써서 1차 실패 원인이
+    사라졌는데, 1차가 한도 초과이고 2차가 파싱 오류면 최종 기록에 한도 얘기가 아예
+    안 나와 원인 추적이 끊긴다.
     """
-    last_error: Exception | None = None
+    errors: list[Exception] = []
     attempts = 0
     for _attempt in range(MAX_RETRIES + 1):
         attempts += 1
@@ -75,11 +84,13 @@ def generate_with_retry(provider: Provider, prompt: str, *, temperature: float =
             candidate.subscription_calls = attempts if _is_subscription(provider) else 0
             return candidate
         except Exception as exc:  # noqa: BLE001 - provider 구현체마다 예외 타입이 다를 수 있음
-            last_error = exc
+            errors.append(exc)
+            if not _is_retryable(exc):
+                break
 
     return Candidate(
         model_id=provider.model_id,
-        content=f"(error) {last_error}",
+        content=f"(error) {_render_errors(errors)}",
         tokens=None,
         latency_ms=None,
         cost_usd=None,
@@ -87,6 +98,24 @@ def generate_with_retry(provider: Provider, prompt: str, *, temperature: float =
         # 끝내 실패했어도 시도한 만큼 구독 한도는 이미 소모됐다.
         subscription_calls=attempts if _is_subscription(provider) else 0,
     )
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """재시도가 한도/시간만 낭비하는 실패를 걸러낸다.
+
+    `ProviderError`가 아닌 예외는 재시도한다(기존 동작 유지) — provider 계약상 실패는
+    `ProviderError`여야 하므로 다른 타입이 올라온 건 이미 이상 상황이고, 판단 근거가
+    없는 상태에서 재시도를 없애면 일시적 네트워크 오류가 래핑 없이 새는 경우까지
+    같이 잃는다. 상한이 1회라 낭비 폭도 제한된다.
+    """
+    return exc.is_retryable if isinstance(exc, ProviderError) else True
+
+
+def _render_errors(errors: list[Exception]) -> str:
+    """시도가 여러 번이면 몇 차 시도의 실패인지까지 남긴다."""
+    if len(errors) == 1:
+        return str(errors[0])
+    return " | ".join(f"{index}차: {exc}" for index, exc in enumerate(errors, start=1))
 
 
 def _is_subscription(provider: Provider) -> bool:

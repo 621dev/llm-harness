@@ -30,7 +30,7 @@ Phase 3 검증: mock 아님 — 실제 claude/codex CLI(구독) + Gemini REST AP
 cd harness-mvp
 pip install -e .[dev]                                     # pydantic + pytest 설치
 
-python -m pytest tests/ -v                                # 334개, 전부 mock — 실제 CLI/API 미호출
+python -m pytest tests/ -v                                # 346개, 전부 mock — 실제 CLI/API 미호출
 
 PYTHONPATH=src python -m harness.cli run --task examples/task.fan_out.json
 PYTHONPATH=src python -m harness.cli run --task examples/task.fan_out.json --models claude,gemini  # 이 실행만 후보 모델 오버라이드(codex 제외)
@@ -234,7 +234,7 @@ dashboard/failure_analysis/live_status → cli). CI 없는 프로젝트라 "린�
 검증**: `schemas.py`에 `from . import orchestrator`(역방향) 임시 추가 →
 테스트가 정확히 잡아내는 것 확인 후 원복.
 
-## 테스트 (334개, 전부 통과)
+## 테스트 (346개, 전부 통과)
 
 새 테스트 파일 추가/파일별 개수 변경 시 이 표도 같이 갱신(2026-07-24 문서
 감사에서 실제(239개)와 다른 옛 숫자(141개)로 오래 방치된 것 발견 —
@@ -245,7 +245,7 @@ dashboard/failure_analysis/live_status → cli). CI 없는 프로젝트라 "린�
 | --- | --- | --- |
 | `test_cli.py` | 42 | `--models` 파싱(기본값/콤마 구분/공백 제거/알 수 없는 모델 거부), 후보 provider 부분 선택 시 나머지 제외, judge/delegation/agent provider는 선택 무관 항상 포함, config.json의 judge_model/delegation_model/max_refinement_rounds/max_agent_turns 반영 여부, config.json 없음/일부 필드만 처리, 기본 config 경로가 cwd 기준 상대경로 해석(ADR 0005), `git worktree list --porcelain` 파싱/탐색(모킹), `worktree-sync`/`worktree-check-cleanup`의 동기화·정리 판정 로직(up_to_date/merged 판정은 stdout 문구가 아니라 merge 전후 HEAD SHA 비교로 함), `delegation_role_fallback_models` 설정 시 `QuotaFallbackProvider`로 감싸지는지/미설정 역할은 그대로인지/알 수 없는 폴백 모델 거부, **등록만 남고 디렉터리가 사라진 worktree는 `missing`으로 보고하고 나머지 동기화를 계속 진행**(2026-07-28: 예전엔 OSError로 run 전체가 중단됐다) + stdout이 None이어도 죽지 않는 방어 |
 | `test_step0_smoke.py` | 2 | pydantic 생성 시점 검증, dispatcher unknown team_pattern 방어 |
-| `test_step2_model_runner.py` | 5 | fan_out_judge 후보 생성, 재시도/복구, auth_mode별 cost_usd |
+| `test_step2_model_runner.py` | 11 | fan_out_judge 후보 생성, 재시도/복구, auth_mode별 cost_usd, **재시도 분류**(2026-07-29 — 한도 초과/인증 실패는 재시도 안 함, 그 외는 기존대로, 시도별 오류를 전부 보존) |
 | `test_step3_subagent_runner.py` | 9 | 체인 실행, 컨텍스트 격리, 재시도/복구, 체인 중단, 역할별 지시문 스코핑(첫 스텝/이어받는 스텝 문구 구분, input_ref는 원본 내용 유지), 3번째 스텝이 원본 요청+모든 이전 스텝 결과를 누적해서 받는지(content_finalization 회귀 방지) |
 | `test_step4_planner.py` | 11 | task_type/team_pattern/risk_level/rubric 산출 규칙, `team_pattern:` override(정상/알 수 없는 값 무시), agentic_task의 risk_level=high 강제 및 명시적 override 우선 |
 | `test_step5_router.py` | 9 | 적합성 게이트, team_pattern 사전 분류, direct_call |
@@ -268,6 +268,7 @@ dashboard/failure_analysis/live_status → cli). CI 없는 프로젝트라 "린�
 | `test_chain_final_composition.py` | 6 | 체인 최종 산출물 구성(ADR 0008) — 성공한 모든 스텝 본문 보존(요청한 내용이 사라지지 않는지가 회귀 방지 핵심)/내부 메타데이터 미발행/partial도 같은 규칙/1스텝은 제목 없음, `read_step_content` 헤더 제거·옛 형식 fallback |
 | `test_architecture_layers.py` | 6 | `harness/*.py` 상대 import 추출(순수 함수), 전체 모듈의 허용 계층 준수 여부(`agent_runner` 포함) |
 | `test_quota_fallback_provider.py` | 5 | `QuotaFallbackProvider`(2026-07-27) — quota 오류 시 2차 provider로 전환, quota 아닌 실패는 그대로 전파(폴백 안 함), 성공 시 폴백 안 건드림, **폴백 시 `auth_mode`가 답한 쪽을 따라가는지**(안 그러면 구독 호출이 `subscription_calls`에서 누락, 2026-07-28 회귀 방지) |
+| `test_provider_contract.py` | 6 | **Provider 구현체 전체의 공통 계약**(2026-07-29) — 리플렉션으로 구현체를 찾아 등록표 누락/잔재를 잡고(새 구현체가 조용히 빠지는 것 방지), `auth_mode` 유효값, 정체성 필드, **실패가 `ProviderError`인지**(재시도 분류가 이 계약에 하중을 걸고 있다). API 키 환경변수를 비워서 키 있는 머신에서도 실제 호출이 안 나가게 한다 |
 
 ```bash
 python -m pytest tests/ -v

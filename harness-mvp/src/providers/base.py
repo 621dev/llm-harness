@@ -28,11 +28,38 @@ class ProviderError(RuntimeError):
     그 외(응답 형식 오류, 인증 실패 등 진짜 버그일 수 있는 실패)는 그대로
     전파한다 — 문자열 매칭(예: 에러 메시지에 "429"가 있는지 검사)은 로케일/문구
     변경에 취약하다는 걸 `worktree-sync` 상태 판정 버그에서 이미 겪어서, 발생
-    지점(api_provider.py)에서 상태 코드를 보고 직접 표시하는 방식을 택했다."""
+    지점(api_provider.py)에서 상태 코드를 보고 직접 표시하는 방식을 택했다.
 
-    def __init__(self, message: str, *, is_quota_error: bool = False) -> None:
+    `is_auth_error`(2026-07-29): 인증 실패(HTTP 401/403, API 키 환경변수 미설정)를
+    표시한다. 키가 틀린 건 두 번 해도 틀리다.
+
+    두 플래그는 목적이 다르다 — `is_quota_error`는 "대체 provider로 넘어가도 되나"
+    (`QuotaFallbackProvider`)를, `is_retryable`은 "같은 provider에 다시 던질 가치가
+    있나"(`model_runner`)를 답한다. 한도 초과는 양쪽 모두에 해당하지만 인증 실패는
+    재시도만 무의미하고 대체 provider로는 넘어가지 않는다(설정 오류를 조용히
+    가리면 안 되므로)."""
+
+    def __init__(
+        self, message: str, *, is_quota_error: bool = False, is_auth_error: bool = False
+    ) -> None:
         super().__init__(message)
         self.is_quota_error = is_quota_error
+        self.is_auth_error = is_auth_error
+
+    @property
+    def is_retryable(self) -> bool:
+        """같은 provider에 다시 던질 가치가 있는 실패인가.
+
+        기본값이 True인 게 의도다 — "재시도할 것"을 열거하는 대신 **"재시도하면 안
+        되는 것"만 발생 지점에서 표시**한다. 전자를 택하면 새 실패 유형이 생길 때마다
+        조용히 재시도가 사라지지만, 후자는 조용히 낭비가 생길 뿐이고 상한(1회)이
+        낭비 폭을 막아준다.
+
+        표시 근거는 반드시 **구조적 신호**(HTTP 상태 코드, 환경변수 존재 여부)여야
+        한다. 에러 메시지 문구 매칭으로 판정하는 건 이 프로젝트에서 이미 세 번
+        데인 방식이다(v18 §6).
+        """
+        return not (self.is_quota_error or self.is_auth_error)
 
 
 class Provider(ABC):

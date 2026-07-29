@@ -48,7 +48,10 @@ class ApiProvider(Provider):
     def generate(self, prompt: str, *, temperature: float = 0.7) -> Candidate:
         api_key = os.environ.get(self.api_key_env_var)
         if not api_key:
-            raise ProviderError(f"{self.api_key_env_var} 환경변수가 설정돼 있지 않다 (API 키 필요)")
+            raise ProviderError(
+                f"{self.api_key_env_var} 환경변수가 설정돼 있지 않다 (API 키 필요)",
+                is_auth_error=True,  # 환경변수는 재시도해도 안 생긴다
+            )
 
         url, headers, body = self._build_request(api_key, prompt, temperature)
 
@@ -64,10 +67,13 @@ class ApiProvider(Provider):
         if response.status_code != 200:
             # 429 = rate limit/quota exceeded. QuotaFallbackProvider가 이 플래그로
             # "대체 provider로 넘어가도 되는 실패"와 "진짜 버그" 실패를 구분한다.
+            # 401/403 = 인증 실패. 둘 다 재시도가 무의미해서 model_runner가
+            # is_retryable로 걸러낸다(2026-07-29).
             raise ProviderError(
                 f"{self.provider_id} API 오류 (status={response.status_code}): "
                 f"{self._extract_error_message(response)}",
                 is_quota_error=response.status_code == 429,
+                is_auth_error=response.status_code in (401, 403),
             )
 
         try:

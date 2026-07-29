@@ -26,6 +26,10 @@ gaebalai/claude-code-orchestrator, jikime/harness-lab) + 하네스 기본 개념
 
 - `harness-repo-summary-beginner-ko.md` — 비개발자용
 - `harness-repo-summary-technical-ko.md` — 개발 경험자용
+- `harness-ecc-reanalysis-2026-07-ko.md` — **`affaan-m/ECC` 재분석(2026-07-29).**
+  구조가 성숙한 뒤 같은 레포를 다시 읽고 적용할 것만 골랐다. 채택 2건(재시도
+  오류 분류 결함 수정, Provider 계약 테스트), 보류 1건(예산 상한 — 비용 직결),
+  제외 항목과 이유까지 명시. 층위 차이(ECC는 Claude Code 설정층) 설명 포함
 
 ## 02_구현플랜
 
