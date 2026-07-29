@@ -70,6 +70,17 @@ class HarnessConfig(BaseModel):
       cost_usd가 None이라 금액 지표에 안 잡힌다). 둘 다 null(기본값)이면 아무것도
       막지 않는다. 상한에 걸리면 run은 error가 아니라 partial로 끝난다 — 이미 만든
       산출물을 버리면 그때까지 쓴 비용이 통째로 낭비되므로.
+    - agent_system_prompt: agentic_task 에이전트에 주입할 시스템 프롬프트
+      (2026-07-29). null이면 기본값 — 작업공간이 격리돼 있다는 것, 쓸 수 있는
+      도구가 Read/Write/Edit뿐이라는 것, 결과물이 응답 요약이 아니라 파일이라는
+      것을 미리 알려준다(실측에서 에이전트가 초반 2~3턴을 방향 파악과 차단된
+      도구 시도에 썼다 — 턴은 곧 구독 한도다). 도메인 성격에 맞게 바꿀 수 있고,
+      빈 문자열을 주면 주입을 끈다.
+    - use_learned_notes: `learned.md`(사람이 쓴 학습 메모)를 다음 run 프롬프트에
+      주입할지 (2026-07-29, 기본 true). run 관측 **기록**은 이 값과 무관하게 항상
+      자동으로 쌓인다 — 끄는 건 반영 쪽뿐이다. 자동 집계
+      (`learned/observations.jsonl`)는 애초에 주입되지 않는다: 사람이 읽고 판단해
+      `learned.md`에 쓴 것만 반영된다("기록은 자동, 반영은 명시적").
     """
 
     candidate_models: list[str] = Field(default_factory=lambda: ["claude", "codex", "gemini"])
@@ -82,6 +93,8 @@ class HarnessConfig(BaseModel):
     max_agent_turns: int = 8
     budget_usd: Optional[float] = None
     budget_subscription_calls: Optional[int] = None
+    agent_system_prompt: Optional[str] = None
+    use_learned_notes: bool = True
 
 
 def load_config(path: Path | None = None) -> HarnessConfig:

@@ -59,7 +59,7 @@ from providers.base import Provider
 from providers.cli_subscription_provider import ClaudeAgentProvider, ClaudeCliProvider, CodexCliProvider
 from providers.fallback_provider import QuotaFallbackProvider
 
-from . import dashboard, failure_analysis, live_status, orchestrator
+from . import dashboard, failure_analysis, learning, live_status, orchestrator
 from .config import HarnessConfig, load_config
 from .schemas import ProviderConfig, TaskInput
 
@@ -163,6 +163,8 @@ def _providers_from_args(args: argparse.Namespace) -> dict[str, Provider]:
     orchestrator.MAX_AGENT_TURNS = config.max_agent_turns
     orchestrator.BUDGET_USD = config.budget_usd
     orchestrator.BUDGET_SUBSCRIPTION_CALLS = config.budget_subscription_calls
+    orchestrator.AGENT_SYSTEM_PROMPT = config.agent_system_prompt
+    orchestrator.USE_LEARNED_NOTES = config.use_learned_notes
     models = _parse_models(args.models, config.candidate_models)
     return _default_providers(models, config)
 
@@ -244,6 +246,43 @@ def cmd_safety_approve(args: argparse.Namespace) -> int:
 def cmd_safety_reject(args: argparse.Namespace) -> int:
     observation = orchestrator.resolve_safety_review(args.run_id, "rejected")
     print(f"[{observation.status}] {observation.summary}")
+    return 0
+
+
+def cmd_learn(_args: argparse.Namespace) -> int:
+    """쌓인 run 관측을 집계해 사람이 읽을 형태로 보여준다 (2026-07-29).
+
+    **결론을 내리지 않고 숫자만 낸다.** "gemini가 4/5 승"은 사실이고 "gemini를
+    쓰라"는 해석이다 — 표본이 충분한지, 태스크 성격이 달랐는지를 봐야 하는 판단이라
+    사람에게 남긴다. 반영하려면 이 출력을 보고 `learned.md`에 직접 쓸 것.
+    """
+    summary = learning.summarize()
+    if not summary["runs"]:
+        print("아직 기록된 run이 없다 — run을 몇 번 돌리면 여기에 집계가 쌓인다.")
+        return 0
+
+    print(f"기록된 run: {summary['runs']}개")
+    for label, key in (("패턴별 run 수", "patterns"), ("judge 승수", "wins"), ("provider 실패 횟수", "failures")):
+        if summary[key]:
+            print(f"\n[{label}]")
+            for name, count in summary[key].items():
+                print(f"  {name}: {count}")
+    for label, key in (("비용(USD)", "cost_usd"), ("구독 호출", "subscription_calls")):
+        if stats := summary[key]:
+            print(
+                f"\n[{label}] 최소 {stats['min']} / 평균 {stats['mean']} / 최대 {stats['max']} "
+                f"(표본 {stats['samples']}개)"
+            )
+
+    notes_path = Path.cwd() / learning.LEARNED_NOTES_FILENAME
+    if notes_path.is_file():
+        print(f"\n{learning.LEARNED_NOTES_FILENAME}가 이미 있다 — 다음 run에 주입된다.")
+    else:
+        print(
+            f"\n반영하려면 이 디렉터리에 {learning.LEARNED_NOTES_FILENAME}를 만들어 "
+            f"판단한 내용을 쓸 것. 파일이 있으면 다음 run 프롬프트에 참고 자료로 붙는다"
+            f"(자동 집계는 주입되지 않는다 — 잘못된 학습이 조용히 누적되는 것을 막기 위함)."
+        )
     return 0
 
 
@@ -627,6 +666,12 @@ def build_parser() -> argparse.ArgumentParser:
         "analyze-failures", help="전체 run의 errors.json/safety_review.json을 모아 실패 패턴을 집계한다"
     )
     analyze_failures_parser.set_defaults(func=cmd_analyze_failures)
+
+    learn_parser = subparsers.add_parser(
+        "learn",
+        help="쌓인 run 관측을 집계해서 보여준다(결론은 내리지 않음 — 반영은 learned.md에 사람이 직접 쓴다)",
+    )
+    learn_parser.set_defaults(func=cmd_learn)
 
     status_parser = subparsers.add_parser(
         "status", help="지금 실행 중/중단됨/대기 중인 run을 실시간으로 보여준다(dashboard와 달리 회고적이지 않음)"

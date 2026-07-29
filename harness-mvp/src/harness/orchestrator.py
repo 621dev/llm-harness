@@ -42,6 +42,7 @@ from . import (
     run_store,
     safety,
     subagent_runner,
+    learning,
     synthesizer,
 )
 from .budget import BudgetTracker
@@ -88,6 +89,17 @@ MAX_SUBSCRIPTION_CANDIDATES = 1
 BUDGET_USD: Optional[float] = None
 BUDGET_SUBSCRIPTION_CALLS: Optional[int] = None
 
+# agentic_task 에이전트에 주입할 시스템 프롬프트. None이면 provider 기본값
+# (`DEFAULT_AGENT_SYSTEM_PROMPT` — 작업공간 격리/사용 가능 도구/산출물이 파일이라는
+# 것을 미리 알려줘 초반 턴 낭비를 줄인다). config.json의 `agent_system_prompt`로
+# 도메인별로 바꿀 수 있고, 빈 문자열을 주면 주입을 끈다.
+AGENT_SYSTEM_PROMPT: Optional[str] = None
+
+# run 간 학습 (2026-07-29). 기록은 항상 자동이고, **주입은 사람이 `learned.md`를
+# 썼을 때만** 일어난다 — 파일을 쓰는 행위 자체가 승인이다(`learning.py` 참고).
+# config.json의 `use_learned_notes: false`로 주입만 끌 수 있다(기록은 계속된다).
+USE_LEARNED_NOTES = True
+
 _REPLAY_FILES = (
     "plan.md",
     "fitness_check.json",
@@ -112,6 +124,7 @@ def run(task: TaskInput, providers: dict[str, Provider], *, root: Optional[Path]
     run_dir = run_store.create_run(run_id=f"run-{task.task_id}", root=root)
     live_status.write_run_meta(run_dir)
     run_store.write_json(run_dir, "input.json", task.model_dump(mode="json"))
+    task = _apply_learned_notes(task, run_dir)
 
     fitness = router.check_fitness(task)
     run_store.write_json(run_dir, "fitness_check.json", fitness.model_dump(mode="json"))
@@ -342,14 +355,21 @@ def _run_fan_out_judge(
     # 후보 하나가 재시도까지 실패해도 run 전체가 성공할 수 있다 — 그래도 DoD/Section 6에
     # 따라 그 실패는 errors.json에 반드시 남긴다 (전체 성공 여부와 무관하게).
     errors = [
-        {"stage": f"candidate '{c.model_id}'", "message": f"재시도까지 실패: {c.content}"}
+        # `kind`/`provider`는 소비자가 문구를 파싱하지 않게 하려고 붙인다(2026-07-29,
+        # learning 집계가 첫 소비자). stage/message는 사람이 읽는 용도로 그대로 둔다.
+        {
+            "kind": "candidate_failure",
+            "provider": c.model_id,
+            "stage": f"candidate '{c.model_id}'",
+            "message": f"재시도까지 실패: {c.content}",
+        }
         for c in candidates
         if c.status == "error"
     ]
     if len(candidates) < len(selected):
         # run_all이 예산 상한에 걸려 남은 provider를 호출하지 않고 멈췄다.
         # 후보가 아예 안 만들어진 provider는 error Candidate조차 없으므로 여기서 남긴다.
-        errors.append({"stage": "fan_out_judge", "message": budget.reason})
+        errors.append({"kind": "budget", "stage": "fan_out_judge", "message": budget.reason})
 
     successful = [c for c in candidates if c.status == "success"]
     completed, failed = len(successful), len(candidates) - len(successful)
@@ -487,7 +507,9 @@ def _run_iterative_refinement(
         if budget.exhausted:
             # 라운드마다 생성+판정 2회를 쓰므로 시작 전에 막는 게 의미가 크다.
             # 이미 만든 산출물은 아래에서 partial로 승격된다.
-            errors.append({"stage": f"refinement round {round_index}", "message": budget.reason})
+            errors.append(
+                {"kind": "budget", "stage": f"refinement round {round_index}", "message": budget.reason}
+            )
             break
         candidate = model_runner.generate_with_retry(generator, prompt, budget=budget)
         latency_parts.append(candidate.latency_ms)
@@ -598,7 +620,7 @@ def _run_agentic_task(
         # 끊으면 파일을 쓰다 만 상태가 남는다.
         return _finalize_without_output(
             run_dir,
-            errors=[{"stage": "agentic_task", "message": budget.reason}],
+            errors=[{"kind": "budget", "stage": "agentic_task", "message": budget.reason}],
             latency_ms=None,
             cost_usd=None,
             subscription_calls=0,
@@ -607,7 +629,13 @@ def _run_agentic_task(
         )
 
     try:
-        result = agent_runner.run_agent_task(agent_provider, task.prompt, run_dir, max_turns=MAX_AGENT_TURNS)
+        result = agent_runner.run_agent_task(
+            agent_provider,
+            task.prompt,
+            run_dir,
+            max_turns=MAX_AGENT_TURNS,
+            system_prompt_append=AGENT_SYSTEM_PROMPT,
+        )
     except Exception as exc:  # noqa: BLE001 - provider 구현체마다 예외 타입이 다를 수 있음
         # 에이전트가 시작조차 못 한 경우(바이너리 없음/타임아웃 등). 다른 패턴의
         # "재시도까지 실패" 경로와 달리 재시도하지 않는다 — 부분적으로 파일을
@@ -861,6 +889,15 @@ def _finalize(
 
     run_store.write_json(run_dir, "errors.json", errors)
     run_store.write_markdown(run_dir, "final.md", formatted_content)
+    # 여기서만 학습을 기록한다(2026-07-29). Safety 검토 대기로 빠진 run은 아직 끝난 게
+    # 아니라(resume으로 이어짐) 기록하면 이중 계상된다. 실패해도 run을 망가뜨리지 않게
+    # 감싼다 — 학습은 부가 기능인데 그것 때문에 완성된 산출물을 잃으면 배보다 배꼽이 크다.
+    try:
+        learning.record_run(run_dir)
+    except Exception as exc:  # noqa: BLE001 - 학습 실패가 run 실패가 되면 안 된다
+        errors = [*errors, {"stage": "learning", "message": f"학습 기록 실패(run은 정상): {exc}"}]
+        run_store.write_json(run_dir, "errors.json", errors)
+
     status = "warning" if errors else "success"
     summary = success_summary or (
         f"{stage} run 완료" + (f" (경고 {len(errors)}건 — 나머지로 계속 진행함)" if errors else "")
@@ -907,6 +944,26 @@ def _enter_safety_review(
         artifacts=["safety.md", "pending_review_content.md"],
         next_actions=["ask_user"],
     )
+
+
+def _apply_learned_notes(task: TaskInput, run_dir: Path) -> TaskInput:
+    """사람이 쓴 `learned.md`가 있으면 프롬프트에 참고 자료로 붙인다 (2026-07-29).
+
+    **파일이 없으면 아무것도 하지 않는다** — 자동으로 축적된 관측
+    (`learned/observations.jsonl`)은 여기로 들어오지 않는다. 사람이 그것을 읽고
+    판단해서 `learned.md`에 쓴 것만 반영된다("기록은 자동, 반영은 명시적").
+
+    주입한 내용은 run 안에 복사해둔다. `learned.md`는 시간이 지나며 바뀌므로,
+    기록이 없으면 "그때 무엇을 학습한 상태였나"를 몰라 run을 다시 해석할 수 없다.
+    """
+    if not USE_LEARNED_NOTES:
+        return task
+    notes = learning.load_notes()
+    if not notes:
+        return task
+
+    run_store.write_markdown(run_dir, learning.INJECTED_FILENAME, notes)
+    return task.model_copy(update={"prompt": learning.apply_to_prompt(task.prompt, notes)})
 
 
 def _write_plan(run_dir: Path, plan: Plan) -> None:

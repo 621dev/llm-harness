@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Optional
 from typing import Protocol
 
 from . import run_store
@@ -43,12 +44,26 @@ class AgentProvider(Protocol):
         ...
 
 
-def run_agent_task(provider: AgentProvider, prompt: str, run_dir: Path, *, max_turns: int) -> AgentRunResult:
-    """에이전트를 격리된 작업공간에서 실행하고, 산출물/행동 기록을 채워 반환한다."""
+def run_agent_task(
+    provider: AgentProvider,
+    prompt: str,
+    run_dir: Path,
+    *,
+    max_turns: int,
+    system_prompt_append: Optional[str] = None,
+) -> AgentRunResult:
+    """에이전트를 격리된 작업공간에서 실행하고, 산출물/행동 기록을 채워 반환한다.
+
+    `system_prompt_append`가 None이면 provider의 기본값
+    (`DEFAULT_AGENT_SYSTEM_PROMPT`)을 쓴다 — 여기서 None을 그대로 넘기지 않고
+    인자를 생략하는 이유는, None을 넘기면 "주입하지 않음"이 되어 기본값이 꺼지기
+    때문이다(config에서 빈 문자열로 명시적으로 끌 수는 있다).
+    """
     workspace = agent_workspace(run_dir)
     workspace.mkdir(parents=True, exist_ok=True)
 
-    result = provider.run_agent(prompt, workspace, max_turns=max_turns)
+    extra = {} if system_prompt_append is None else {"system_prompt_append": system_prompt_append}
+    result = provider.run_agent(prompt, workspace, max_turns=max_turns, **extra)
     result.produced_files = list_produced_files(workspace)
 
     run_store.write_json(

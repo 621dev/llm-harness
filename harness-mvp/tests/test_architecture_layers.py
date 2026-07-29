@@ -38,6 +38,9 @@ _ALLOWED_INTERNAL_IMPORTS: dict[str, set[str]] = {
     # budget은 schemas만 본다 — 예산은 "얼마 썼나"만 아는 값 객체이고, 어디서
     # 어떻게 호출하는지는 모른다(호출부가 넘겨받아 쓴다).
     "budget": {"schemas"},
+    # learning은 run 산출물을 읽고 쓰기만 한다 — 어떤 패턴이 돌았는지, 누가
+    # 호출했는지는 모른다(orchestrator가 끝난 run을 넘겨준다).
+    "learning": {"run_store", "schemas"},
     "router": {"schemas"},
     "safety": {"schemas"},
     "synthesizer": {"schemas"},
@@ -49,6 +52,7 @@ _ALLOWED_INTERNAL_IMPORTS: dict[str, set[str]] = {
     "orchestrator": {
         "agent_runner",
         "budget",
+        "learning",
         "judge",
         "live_status",
         "model_runner",
@@ -63,7 +67,15 @@ _ALLOWED_INTERNAL_IMPORTS: dict[str, set[str]] = {
     "dashboard": {"run_store", "schemas"},
     "failure_analysis": {"run_store", "schemas"},
     "live_status": {"run_store"},
-    "cli": {"dashboard", "failure_analysis", "live_status", "orchestrator", "config", "schemas"},
+    "cli": {
+        "dashboard",
+        "failure_analysis",
+        "learning",  # `learn` 서브커맨드가 집계를 읽어 사람에게 보여준다
+        "live_status",
+        "orchestrator",
+        "config",
+        "schemas",
+    },
 }
 
 

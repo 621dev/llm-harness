@@ -102,6 +102,35 @@ DEFAULT_AGENT_DISALLOWED_TOOLS = ("Bash", "Glob", "Grep", "WebFetch", "WebSearch
 # 권한 모드: "허용 규칙에 없으면 거부" (위 1번). 이 값을 바꾸면 경계 전체가 무너진다.
 AGENT_PERMISSION_MODE = "dontAsk"
 
+# 에이전트에게 실행 환경을 미리 알려주는 시스템 프롬프트 (2026-07-29 추가).
+#
+# **왜 필요한가**: `hierarchical_delegation`은 스텝마다 역할 지시문을 주는데
+# (`subagent_runner._apply_role_instruction`) `agentic_task`는 raw 프롬프트만 넘겼다 —
+# 에이전트가 자기가 어떤 환경에 있는지 모르는 상태로 시작했다. 실측(2026-07-27 첫 e2e)에서
+# **초반 2~3턴을 방향 파악에 썼고 거기엔 차단된 도구를 시도해보는 것도 포함**됐다.
+# 턴은 곧 구독 한도라, 미리 알려주는 것만으로 낭비가 줄어든다(MAX_AGENT_TURNS를
+# 5에서 8로 올린 이유가 이 낭비였다).
+#
+# **왜 `--append-system-prompt`인가**: 경계를 건드리지 않는 유일한 주입 방법이다.
+# `--add-dir`은 접근 범위를 넓히고, 워크스페이스에 스킬/CLAUDE.md를 써넣는 방식은
+# 그 파일이 산출물로 수집돼 결과를 오염시킨다.
+#
+# 언어: 인접 코드(`subagent_runner._apply_role_instruction`)와 맞춰 한국어로 둔다.
+# 작업규칙의 "서브에이전트 프롬프트는 영어"는 Claude Code 자체의 Task 서브에이전트를
+# 가리키는 것으로 읽었다 — 여기는 한국어 산출물을 만드는 provider 호출 경로다.
+DEFAULT_AGENT_SYSTEM_PROMPT = (
+    "당신은 파일 기반 하네스가 실행한 격리된 작업공간 안에서 동작합니다. "
+    "다음을 전제로 바로 작업을 시작하세요.\n"
+    "- 현재 디렉터리가 작업공간 전체입니다. 이 밖의 파일은 읽을 수 없고, "
+    "저장소나 프로젝트 문서도 보이지 않습니다. 찾으려 시도하지 마세요.\n"
+    "- 사용 가능한 도구는 Read/Write/Edit뿐입니다. Bash·Grep·Glob·WebFetch·"
+    "WebSearch·Task는 차단돼 있으니 시도하지 마세요(시도만으로 턴이 소모됩니다).\n"
+    "- **결과물은 당신이 만든 파일입니다.** 응답 텍스트의 요약이 아니라 작업공간에 "
+    "남은 파일이 수집됩니다. 작업 보고나 승인 요청 대신 파일을 완성하세요.\n"
+    "- 턴 수에 상한이 있습니다. 탐색이나 확인 질문보다 곧바로 산출물을 만드세요.\n"
+    "- 별도 지시가 없으면 문서 본문은 한국어로 작성하세요."
+)
+
 
 class CliSubscriptionProvider(Provider):
     """claude/codex CLI subprocess 호출의 공통 로직. temperature는 두 CLI 모두
@@ -232,6 +261,7 @@ class ClaudeAgentProvider(ClaudeCliProvider):
         max_turns: int,
         allowed_tools: Sequence[str] = DEFAULT_AGENT_ALLOWED_TOOLS,
         disallowed_tools: Sequence[str] = DEFAULT_AGENT_DISALLOWED_TOOLS,
+        system_prompt_append: Optional[str] = DEFAULT_AGENT_SYSTEM_PROMPT,
     ) -> AgentRunResult:
         """에이전트를 workspace 안에서 실행하고 턴별 기록과 함께 결과를 돌려준다.
 
@@ -254,6 +284,13 @@ class ClaudeAgentProvider(ClaudeCliProvider):
             "--allowedTools", ",".join(allowed_tools),
             "--disallowedTools", ",".join(disallowed_tools),
         ]
+        if system_prompt_append:
+            # `--append-system-prompt`를 쓰는 이유(2026-07-29): 에이전트에 환경을 알려주는
+            # 방법 중 **경계를 건드리지 않는 유일한 것**이다. `--add-dir`은 접근 범위를
+            # 넓히고, 워크스페이스에 스킬 파일을 써넣는 방식은 그 파일이 산출물로
+            # 수집돼(`list_produced_files`) 결과를 오염시킨다. `--system-prompt`(교체)가
+            # 아니라 append인 이유는 기본 시스템 프롬프트의 도구 사용 규칙을 유지하려는 것.
+            command += ["--append-system-prompt", system_prompt_append]
         try:
             result = subprocess.run(
                 command,

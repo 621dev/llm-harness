@@ -269,6 +269,73 @@ class ClaudeAgentProviderTest(unittest.TestCase):
         self.assertEqual(kwargs.get("input"), "학습 자료를 만들어줘")  # 프롬프트는 stdin
 
     @patch("providers.cli_subscription_provider.subprocess.run")
+    def test_system_prompt_is_appended_not_replaced(self, mock_run) -> None:
+        """에이전트에 환경을 알려주되(2026-07-29) 기본 시스템 프롬프트를 지우지 않는다.
+
+        `--system-prompt`(교체)를 쓰면 CLI 기본 프롬프트의 도구 사용 규칙까지 사라진다.
+        경계를 인자로 강제하고 있긴 하지만, 모델이 도구를 어떻게 쓰는지에 대한 기본
+        지침을 굳이 없앨 이유가 없다.
+        """
+        self.run_agent(mock_run, agent_stream())
+
+        args = mock_run.call_args.args[0]
+        self.assertIn("--append-system-prompt", args)
+        self.assertNotIn("--system-prompt", args)
+
+    @patch("providers.cli_subscription_provider.subprocess.run")
+    def test_default_system_prompt_states_the_actual_boundary(self, mock_run) -> None:
+        """주입 내용이 실제 경계와 어긋나면 에이전트를 오히려 헷갈리게 한다.
+
+        차단 도구 목록을 프롬프트에 문장으로 적어두는 방식이라, `--disallowedTools`를
+        바꾸고 프롬프트를 안 바꾸면 거짓말이 된다. 그 불일치를 여기서 잡는다.
+        """
+        self.run_agent(mock_run, agent_stream())
+
+        args = mock_run.call_args.args[0]
+        injected = args[args.index("--append-system-prompt") + 1]
+        disallowed = args[args.index("--disallowedTools") + 1].split(",")
+
+        for tool in disallowed:
+            if tool == "NotebookEdit":
+                continue  # 문장에 일일이 안 적음 — 파일 도구 계열이라 혼선 여지가 없다
+            with self.subTest(tool=tool):
+                self.assertIn(tool, injected)
+        # 산출물이 파일이라는 것도 반드시 알려야 한다(응답 요약만 내놓는 실측 사례 있음)
+        self.assertIn("파일", injected)
+
+    @patch("providers.cli_subscription_provider.subprocess.run")
+    def test_injection_can_be_turned_off(self, mock_run) -> None:
+        """도메인이 자기 지시문을 직접 쓰고 싶을 때 기본값을 끌 수 있어야 한다."""
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["claude"], returncode=0, stdout=agent_stream(), stderr=""
+        )
+
+        self.provider.run_agent(
+            "학습 자료를 만들어줘", self.workspace, max_turns=5, system_prompt_append=""
+        )
+
+        self.assertNotIn("--append-system-prompt", mock_run.call_args.args[0])
+
+    @patch("providers.cli_subscription_provider.subprocess.run")
+    def test_injection_does_not_widen_the_boundary(self, mock_run) -> None:
+        """튜닝을 추가해도 경계는 그대로여야 한다 — 이게 이 변경의 가장 큰 위험이다.
+
+        `--add-dir`(접근 범위 확대)이나 워크스페이스에 파일을 써넣는 방식(산출물 오염)을
+        쓰지 않고 시스템 프롬프트만으로 알려주는 걸 고정한다.
+        """
+        before = sorted(p.name for p in self.workspace.iterdir())
+
+        self.run_agent(mock_run, agent_stream())
+
+        args = mock_run.call_args.args[0]
+        self.assertNotIn("--add-dir", args)
+        self.assertEqual(args[args.index("--permission-mode") + 1], "dontAsk")
+        self.assertEqual(args[args.index("--allowedTools") + 1], "Read(./**),Write(./**),Edit(./**)")
+        # 하네스가 워크스페이스에 스킬/설정 파일을 심지 않았는지 — 심으면 그 파일이
+        # produced_files로 수집돼 사용자 산출물에 섞인다
+        self.assertEqual(sorted(p.name for p in self.workspace.iterdir()), before)
+
+    @patch("providers.cli_subscription_provider.subprocess.run")
     def test_records_blocked_tool_uses_from_permission_denials(self, mock_run) -> None:
         """경계가 막아낸 시도를 감사 증거로 남기는지 확인 — 2026-07-27 e2e에서
         에이전트가 실제로 Bash를 시도했다(경계 밖 도구를 노리는 건 예외가 아니라
