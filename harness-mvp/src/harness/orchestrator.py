@@ -294,11 +294,27 @@ def _run_pattern(task: TaskInput, plan: Plan, providers: dict[str, Provider], ru
 
 
 def _candidate_providers(providers: dict[str, Provider]) -> dict[str, Provider]:
-    """예약 키(judge/agent)를 제외한, 실제 후보/역할 호출용 provider만 추린다 —
-    direct_call/fan_out_judge가 judge provider를 후보로 잘못 집어가지 않도록
-    방어한다. 에이전트 provider(AGENT_PROVIDER_KEY)도 같이 제외한다: 도구 사용
-    권한을 가진 provider가 일반 텍스트 생성 자리에 섞여 들어가면 안 된다."""
-    return {key: p for key, p in providers.items() if key not in (JUDGE_PROVIDER_KEY, AGENT_PROVIDER_KEY)}
+    """후보 생성(fan_out_judge/direct_call/refinement)에 쓸 provider만 추린다.
+
+    제외 대상 셋:
+
+    - `JUDGE_PROVIDER_KEY` — 판단자를 후보로 집어가면 self-preference bias(ADR 0004)
+    - `AGENT_PROVIDER_KEY` — 도구 사용 권한을 가진 provider가 일반 텍스트 생성 자리에
+      섞이면 안 된다
+    - **체인 역할 provider(`{role}-mock`)** — 2026-07-29 추가. 이게 빠져 있어서
+      `fan_out_judge`가 **`research-mock`을 3번째 후보로 쓰고 있었다**
+      (`num_candidates` 기본값 3 = claude, codex, research-mock).
+      역할 provider는 `hierarchical_delegation`이 `providers[step.provider_id]`로 직접
+      찾아 쓰는 것이고, 후보 자리에 오면 안 된다. 지금까지 무해했던 건 역할 모델이
+      후보 모델과 같아서 결과가 비슷했기 때문이고, 역할별 모델을 다르게 두면
+      (2026-07-29 재편) 후보 구성이 조용히 오염된다.
+
+    역할 키 목록은 planner의 어휘에서 만든다 — 문자열 접미사(`-mock`)로 걸러내면
+    사용자가 그 이름의 후보 모델을 등록하는 순간 조용히 사라진다.
+    """
+    role_keys = {f"{role}-mock" for role in planner.KNOWN_DELEGATION_ROLES}
+    excluded = {JUDGE_PROVIDER_KEY, AGENT_PROVIDER_KEY} | role_keys
+    return {key: p for key, p in providers.items() if key not in excluded}
 
 
 def _limit_subscription_candidates(candidate_providers: list[Provider]) -> list[Provider]:
@@ -311,14 +327,21 @@ def _limit_subscription_candidates(candidate_providers: list[Provider]) -> list[
     이 제한을 적용했을 때 남는 후보 수가 MIN_CANDIDATES 미만으로 떨어지면
     적용하지 않는다 — 한도 보호보다 "run이 아예 실패하는 것"이 더 나쁘다.
     원래 순서는 최대한 보존한다(재현성/가독성 목적).
+
+    **`p.auth_mode`(속성)를 읽는다. `p.config.auth_mode`가 아니다** — 2026-07-29에
+    이걸로 상한이 통째로 무효였다. `QuotaFallbackProvider`로 감싸면 wrapper의 config는
+    호출부가 만든 것이고 `auth_mode` 기본값이 `"api_key"`라, **구독 provider가 하나도
+    안 보여서 상한이 아예 발동하지 않았다.** wrapper는 실제로 답한 쪽을 따라가는 동적
+    `auth_mode` 속성을 갖고 있는데(2026-07-28 `subscription_calls` 누락 수정 때 추가)
+    여기서 그 속성을 우회하고 있었다 — **같은 버그를 두 번 다른 자리에서 만든 것**이다.
     """
-    subscription = [p for p in candidate_providers if p.config.auth_mode == "cli_subscription"]
+    subscription = [p for p in candidate_providers if p.auth_mode == "cli_subscription"]
     if len(subscription) <= MAX_SUBSCRIPTION_CANDIDATES:
         return candidate_providers
 
     kept_subscription_ids = {id(p) for p in subscription[:MAX_SUBSCRIPTION_CANDIDATES]}
     limited = [
-        p for p in candidate_providers if p.config.auth_mode != "cli_subscription" or id(p) in kept_subscription_ids
+        p for p in candidate_providers if p.auth_mode != "cli_subscription" or id(p) in kept_subscription_ids
     ]
     if len(limited) < MIN_CANDIDATES:
         return candidate_providers

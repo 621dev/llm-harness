@@ -149,6 +149,40 @@ class DefaultProvidersTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             cli._default_providers(_DEFAULT_CONFIG.candidate_models, config)
 
+    def test_subscription_cap_is_satisfiable_with_the_shipped_config(self) -> None:
+        """`max_subscription_candidates`가 **만족 가능한 값인지** (2026-07-29 추가).
+
+        후보가 전부 구독인데 상한이 `MIN_CANDIDATES`보다 작으면 그 상한은 **원리적으로
+        만족 불가능**하다 — `_limit_subscription_candidates`가 "한도 보호보다 run 실패가
+        더 나쁘다"는 규칙으로 조용히 상한을 무시하고, 결과적으로 아무 일도 하지 않는다.
+
+        실제로 그 상태였다: 2026-07-29 모델 재편으로 `candidate_models`가
+        `[claude, codex]`(둘 다 구독)가 되면서 상한 1이 만족 불가능해졌는데,
+        **아무도 알려주지 않아서** 며칠 뒤 예산 상한값을 계산하다 발견했다.
+
+        상한을 바꾸든 후보 구성을 바꾸든, 다시 만족 불가능해지면 여기서 실패한다.
+        """
+        config = load_config(Path(__file__).resolve().parents[1] / "config.json")
+        subscription_models = [
+            name
+            for name in config.candidate_models
+            if cli._CANDIDATE_PROVIDER_REGISTRY[name](name).auth_mode == "cli_subscription"
+        ]
+
+        if len(subscription_models) <= config.max_subscription_candidates:
+            return  # 상한에 안 걸리는 구성 — 문제될 게 없다
+
+        remaining = len(config.candidate_models) - len(subscription_models) + config.max_subscription_candidates
+        self.assertGreaterEqual(
+            remaining,
+            orchestrator.MIN_CANDIDATES,
+            f"max_subscription_candidates={config.max_subscription_candidates}가 만족 불가능하다: "
+            f"후보 {config.candidate_models} 중 구독이 {len(subscription_models)}개라 상한을 적용하면 "
+            f"{remaining}개만 남고 MIN_CANDIDATES({orchestrator.MIN_CANDIDATES}) 미만이 된다. "
+            f"→ _limit_subscription_candidates가 상한을 조용히 무시하게 되므로, 상한을 올리거나 "
+            f"후보에 종량제 모델을 섞을 것.",
+        )
+
     def test_judge_and_candidates_can_have_fallback(self) -> None:
         """judge/후보 폴백 (2026-07-29).
 

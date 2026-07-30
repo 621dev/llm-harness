@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from harness import orchestrator, run_store  # noqa: E402
 from harness.schemas import ProviderConfig, TaskInput  # noqa: E402
+from providers.fallback_provider import QuotaFallbackProvider  # noqa: E402
 from providers.mock import MockProvider  # noqa: E402
 
 
@@ -133,6 +134,79 @@ class FanOutJudgeIntegrationTest(unittest.TestCase):
         errors = run_store.read_json(run_dir, "errors.json")
         self.assertEqual(len(errors), 1)
         self.assertIn("model-b", errors[0]["message"] + errors[0]["stage"])
+
+    def test_cap_sees_subscription_through_the_quota_fallback_wrapper(self) -> None:
+        """**구독 상한이 통째로 무효였던 버그의 회귀 방지** (2026-07-29).
+
+        `_limit_subscription_candidates`가 `p.config.auth_mode`를 읽고 있었다.
+        `QuotaFallbackProvider`로 감싸면 wrapper의 config는 호출부가 만든 것이고
+        `auth_mode` 기본값이 `"api_key"`라 — **구독 provider가 하나도 안 보여서 상한이
+        아예 발동하지 않았다.** wrapper는 실제로 답한 쪽을 따라가는 동적 `auth_mode`
+        속성을 갖고 있는데(2026-07-28 `subscription_calls` 누락 수정 때 추가) 여기서
+        그 속성을 우회하고 있었다 — **같은 버그를 두 번 다른 자리에서 만든 것**이다.
+
+        기존 상한 테스트들은 **wrapper를 안 쓴 MockProvider**만 써서 이걸 못 잡았다
+        (감싸지 않으면 `config.auth_mode`와 `auth_mode`가 같다). 실사용은 전부
+        감싸져 있으므로(`config.json`의 폴백 설정) 여기서 감싼 경우를 고정한다.
+        """
+        def wrapped(name: str, auth_mode: str) -> QuotaFallbackProvider:
+            primary = MockProvider(
+                ProviderConfig(provider_id=name, model_id=name, auth_mode=auth_mode), profile="concise"
+            )
+            fallback = MockProvider(
+                ProviderConfig(provider_id=f"{name}-fb", model_id=f"{name}-fb", auth_mode="api_key"),
+                profile="concise",
+            )
+            # wrapper config는 auth_mode를 안 준다 — 실사용(cli._wrap_with_quota_fallback)과 같다
+            return QuotaFallbackProvider(
+                primary=primary, fallback=fallback,
+                config=ProviderConfig(provider_id=name, model_id=name),
+            )
+
+        candidates = [
+            wrapped("sub-a", "cli_subscription"),
+            wrapped("sub-b", "cli_subscription"),
+            wrapped("paid-c", "api_key"),
+        ]
+        saved = orchestrator.MAX_SUBSCRIPTION_CANDIDATES
+        orchestrator.MAX_SUBSCRIPTION_CANDIDATES = 1
+        self.addCleanup(setattr, orchestrator, "MAX_SUBSCRIPTION_CANDIDATES", saved)
+
+        limited = orchestrator._limit_subscription_candidates(candidates)
+
+        # 감싼 상태에서도 구독 2개를 알아보고 1개로 줄여야 한다(+ api_key는 유지)
+        self.assertEqual([p.provider_id for p in limited], ["sub-a", "paid-c"])
+
+    def test_chain_role_providers_are_not_fan_out_candidates(self) -> None:
+        """체인 역할 provider가 후보 자리에 새면 안 된다 (2026-07-29).
+
+        `_candidate_providers`가 judge/agent만 제외해서, `fan_out_judge`가
+        **`research-mock`을 3번째 후보로 쓰고 있었다**(`num_candidates` 기본값 3 =
+        claude, codex, research-mock). 역할 provider는 `hierarchical_delegation`이
+        `providers[step.provider_id]`로 직접 찾는 것이다.
+
+        지금까지 무해했던 건 역할 모델이 후보 모델과 같아서였고, 역할별 모델을 다르게
+        두면(2026-07-29 재편) 후보 구성이 조용히 오염된다.
+        """
+        from harness import planner
+
+        providers = {
+            "claude": MockProvider(ProviderConfig(provider_id="claude", model_id="claude"), profile="concise"),
+            orchestrator.JUDGE_PROVIDER_KEY: MockProvider(
+                ProviderConfig(provider_id="judge", model_id="judge"), profile="judge"
+            ),
+            orchestrator.AGENT_PROVIDER_KEY: MockProvider(
+                ProviderConfig(provider_id="agent", model_id="agent"), profile="concise"
+            ),
+        }
+        for role in planner.KNOWN_DELEGATION_ROLES:
+            providers[f"{role}-mock"] = MockProvider(
+                ProviderConfig(provider_id=f"{role}-mock", model_id=f"{role}-mock"), profile="concise"
+            )
+
+        candidates = orchestrator._candidate_providers(providers)
+
+        self.assertEqual(list(candidates), ["claude"])
 
     def test_subscription_candidates_capped_to_protect_quota(self) -> None:
         """구독 provider가 2개(model-a, model-b) 있어도 MAX_SUBSCRIPTION_CANDIDATES=1이라
