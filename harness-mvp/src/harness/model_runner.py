@@ -167,6 +167,11 @@ def _render_candidate_markdown(candidate: Candidate) -> str:
         f"# Candidate: {candidate.model_id}\n\n"
         f"- status: {candidate.status}\n"
         f"- tokens: {candidate.tokens}\n"
+        # 입력 토큰도 남긴다(2026-07-29). `Candidate.input_tokens`를 추가할 때 체인 스텝
+        # 파일에만 반영하고 여기를 빼먹어서, fan_out의 입력 규모를 산출물에서 읽을 수
+        # 없었다 — 같은 정보인데 패턴에 따라 있고 없는 건 비대칭이다(측정 스크립트
+        # mock 검증이 잡았다).
+        f"- input_tokens: {candidate.input_tokens}\n"
         f"- latency_ms: {candidate.latency_ms}\n"
         f"- cost_usd: {candidate.cost_usd}\n\n"
         f"{candidate.content}\n"

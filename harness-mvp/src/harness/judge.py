@@ -35,7 +35,10 @@ from . import model_runner
 from .budget import BudgetTracker
 from .schemas import Judging, JudgingScore, Candidate, RefinementVerdict
 
-_MERGE_THRESHOLD = 0.1  # 1·2등 점수 차이가 이 값(0~1 스케일) 미만이면 병합 전략 추천
+# 1·2등 점수 차이가 이 값(0~1 스케일) 미만이면 "판정자가 못 갈랐다"로 본다.
+# 예전엔 이 조건에서 병합 전략을 추천했으나 ADR 0011로 폐기했다 — 이름은 이력 때문에
+# 남겼고, 지금 쓰임은 `Judging.top_scores_near_tie` 표시뿐이다.
+_MERGE_THRESHOLD = 0.1
 
 
 class JudgeError(RuntimeError):
@@ -81,6 +84,7 @@ def evaluate(
     return Judging(
         scores=scores,
         recommended_strategy=_recommend_strategy(scores),
+        top_scores_near_tie=_is_near_tie(scores),
         winner=winner.candidate,
         latency_ms=judge_candidate.latency_ms,
         cost_usd=judge_candidate.cost_usd,
@@ -262,10 +266,21 @@ def _parse_response(content: str, labels: dict[str, Candidate]) -> dict[str, dic
 
 
 def _recommend_strategy(scores: list[JudgingScore]) -> str:
-    if len(scores) == 1:
-        return "single_candidate"
+    """최종 답변을 어떻게 만들지 (ADR 0011로 선택지가 둘로 줄었다).
 
+    예전엔 1·2등이 근소하면 `"merge_top_candidates"`를 돌려주고 synthesizer가 상위 두
+    후보를 이어붙였다. **그 병합이 산출물을 망쳤다** — final.md가 완결된 문서 두 개가
+    되어서, "절차서 하나를 작성해줘"라는 프롬프트에 두 개를 내놓고 불합격했다(7차 측정).
+    근소하다는 건 **어느 쪽을 써도 비슷하다**는 뜻이고, 둘을 붙이라는 뜻이 아니었다.
+
+    근소 여부 자체는 `Judging.top_scores_near_tie`로 계속 남는다(`_is_near_tie`).
+    """
+    return "single_candidate" if len(scores) == 1 else "adopt_winner"
+
+
+def _is_near_tie(scores: list[JudgingScore]) -> bool:
+    """1·2등 점수가 `_MERGE_THRESHOLD` 미만으로 붙어 있나 (후보가 하나면 False)."""
+    if len(scores) < 2:
+        return False
     top_two = sorted(scores, key=lambda s: s.score, reverse=True)[:2]
-    if top_two[0].score - top_two[1].score < _MERGE_THRESHOLD:
-        return "merge_top_candidates"
-    return "adopt_winner"
+    return top_two[0].score - top_two[1].score < _MERGE_THRESHOLD

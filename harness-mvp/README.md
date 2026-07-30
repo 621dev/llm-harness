@@ -1,4 +1,4 @@
-# harness-mvp — Phase 1~6 완료 + 팀 패턴 4종 (ADR 0001~0008)
+# harness-mvp — Phase 1~6 완료 + 팀 패턴 4종 (ADR 0001~0011)
 
 전체 설계: `../docs/02_구현플랜/harness-implementation-plan-ko.md`.
 
@@ -9,7 +9,10 @@ Phase 3 검증: mock 아님 — 실제 claude/codex CLI(구독) + Gemini REST AP
 필요, 바로 아래).
 
 로드맵 완료 후 추가된 것: ADR 0005(공유 엔진 + 독립 도메인 폴더 — 1차 검증
-도메인 `../domains/cloud-ops/`), ADR 0006/0007(세 번째·네 번째 팀 패턴), ADR 0008(체인 최종 산출물 구성).
+도메인 `../domains/cloud-ops/`), ADR 0006/0007(세 번째·네 번째 팀 패턴), ADR 0008(체인 최종 산출물 구성),
+ADR 0009(`hierarchical_delegation`을 opt-in으로 강등 — 네 번 측정해서 우위 미입증),
+ADR 0010(`fan_out_judge` 유지 + 패턴 측정을 두 축으로 — 두 번 재서 두 번 다 우세),
+ADR 0011(후보 병합 폐기 — final.md가 문서 두 개가 되던 결함).
 
 **팀 패턴 4종** — `team_pattern` 값으로 분기하며, 뒤 두 개는 `constraints`의
 `"team_pattern:<이름>"` opt-in으로만 진입한다:
@@ -30,7 +33,7 @@ Phase 3 검증: mock 아님 — 실제 claude/codex CLI(구독) + Gemini REST AP
 cd harness-mvp
 pip install -e .[dev]                                     # pydantic + pytest 설치
 
-python -m pytest tests/ -v                                # 415개, 전부 mock — 실제 CLI/API 미호출
+python -m pytest tests/ -v                                # 416개, 전부 mock — 실제 CLI/API 미호출
 
 PYTHONPATH=src python -m harness.cli run --task examples/task.fan_out.json
 PYTHONPATH=src python -m harness.cli run --task examples/task.fan_out.json --models claude,gemini  # 이 실행만 후보 모델 오버라이드(codex 제외)
@@ -57,22 +60,23 @@ Windows PowerShell: `$env:PYTHONPATH="src"; python -m harness.cli run --task ...
 `claude auth login`, `codex login`(브라우저 구독 로그인), `GEMINI_API_KEY`
 환경변수. 하나라도 없으면 그 provider만 재시도 후 `status="error"`로
 `errors.json` 기록 — 나머지 provider로 계속 진행(별도 mock fallback 없음).
-`config.json`의 `max_subscription_candidates`(기본 1) — claude/codex CLI
-동시 호출 방지(구독 한도 보호, 아래 참고).
+`config.json`의 `max_subscription_candidates`(기본 **2**) — claude/codex CLI
+동시 호출 방지(구독 한도 보호, 아래 참고). 1이 아닌 이유: 후보가 claude/codex
+둘 다 구독인데 `MIN_CANDIDATES=2`라, 1은 원리적으로 만족 불가능한 요구다.
 
 **운영 설정** (`harness-mvp/config.json`, 코드 수정 없이 편집 가능 — 파일
 없으면 아래 기본값):
 
 ```json
 {
-  "candidate_models": ["claude", "codex", "gemini"],
-  "judge_model": "gemini",
+  "candidate_models": ["claude", "codex"],
+  "judge_model": "codex",
   "delegation_model": "claude",
-  "max_subscription_candidates": 1,
+  "max_subscription_candidates": 2,
   "max_refinement_rounds": 3,
   "max_agent_turns": 8,
   "budget_usd": 0.05,
-  "budget_subscription_calls": null,
+  "budget_subscription_calls": 20,
   "agent_system_prompt": null,
   "use_learned_notes": true
 }
@@ -103,7 +107,7 @@ Windows PowerShell: `$env:PYTHONPATH="src"; python -m harness.cli run --task ...
 | `src/harness/router.py` | 적합성 게이트(`check_fitness`) + team_pattern 사전 분류(`classify_team_pattern`) |
 | `src/harness/planner.py` | task → Plan(task_type/risk_level/rubric/team_pattern/delegation_chain 규칙 산출). `constraints`의 `"team_pattern:<pattern>"` 명시적 override 지원(`risk_level:` override와 대칭) — iterative_refinement/agentic_task는 키워드 자동 라우팅 없이 이 opt-in으로만 진입. agentic_task는 실제 파일을 만드는 부수 효과가 있어 `risk_level="high"`를 강제(사람 승인 필수, ADR 0007). `_DEFAULT_DELEGATION_ROLES["research"]`는 `[research, design_review]`가 아니라 `[research, design_review, content_finalization]` 3단계(2026-07-27) — design_review의 비평을 실제로 반영해 완성된 결과물을 쓰는 담당자가 체인에 없던 공백을 메움 |
 | `src/harness/judge.py` | `judge_provider`로 실제 LLM 판단(reject-first + JSON 응답 파싱). `evaluate()` — N개 후보 비교(blind A/B 익명화, ADR 0004로 규칙 기반에서 승격, fan_out_judge 전용) + `check_pass()` — 단일 콘텐츠 rubric 합격 판정 + 수정 피드백(iterative_refinement 전용) |
-| `src/harness/synthesizer.py` | winner 채택 또는 상위 두 후보 병합(규칙 기반, fan_out_judge 전용) |
+| `src/harness/synthesizer.py` | winner 후보를 그대로 채택(fan_out_judge 전용). **병합은 ADR 0011로 폐기** — 1·2등이 근소하면 상위 두 후보를 `---`로 이어붙였는데 그러면 final.md가 완결된 문서 두 개가 됐다(7차 측정에서 "절차서 하나" 요청 위반으로 불합격, 12개 run 중 9개가 그랬다). 근소 신호는 `Judging.top_scores_near_tie`로 남는다 |
 | `src/harness/safety.py` | 비밀정보/프롬프트 인젝션/고위험 키워드 규칙 기반 스캔(패턴 공통) |
 | `src/harness/orchestrator.py` | 전체 dispatch: 적합성 게이트 → Planner → (risk_level=high면 승인 대기) → 패턴 실행 → Safety(실패 시 사람 검토 대기) → 기록. `resolve_safety_review()`/`list_safety_review_queue()` 포함. fan_out_judge candidate 선택 시 구독 provider를 `MAX_SUBSCRIPTION_CANDIDATES`개까지만 호출(`_limit_subscription_candidates`, 구독 한도 보호). `_render_chain_final()` — 체인 최종 산출물을 성공한 모든 스텝 본문으로 구성(마지막 스텝만 쓰면 요청한 내용이 final.md에서 사라진다, ADR 0008). `_run_iterative_refinement()` — 생성→합격 판정→피드백 반영 재생성 반복(`MAX_REFINEMENT_ROUNDS=3` 상한, 라운드별 `refinement.json` 기록, 상한 도달/중간 실패 시 마지막 생성물 partial 승격, ADR 0006). `_run_agentic_task()` — 자율 에이전트 실행을 감싼다(`AGENT_PROVIDER_KEY`로 등록된 provider, `MAX_AGENT_TURNS` 상한(기본 8), 턴 상한 도달 시 partial 승격, 안전 경계가 차단한 시도(`blocked_tool_uses`)는 errors.json/보고서에 기록, ADR 0007). `_finalize()`의 `extra_scan_texts`로 에이전트가 만든 **파일 내용까지 Safety 스캔** |
 | `src/harness/cli.py` | `run`/`replay`/`approve`/`reject`/`safety-queue`/`safety-approve`/`safety-reject`/`analyze-failures`/`dashboard`/`status`/`worktree-sync`/`worktree-check-cleanup` 진입점(`python -m harness.cli`). `run`/`approve`는 `--models`로 fan_out_judge 후보 모델(claude/codex/gemini 중 선택)을 그 실행만 오버라이드. `status`는 `live_status.py` 문단, `worktree-sync`/`worktree-check-cleanup`은 `scripts/setup_worktree.py` 문단 참고(도입 배경은 `docs/03_진행상황/harness-progress-detail-ko.md`) |
@@ -176,9 +180,25 @@ ADR 0007). 경계를 실제로 강제하는 건 우리 코드가 아니라 claud
 `scripts/measure_pattern_value.py` — **패턴 부가가치 측정(2026-07-27, 미완).**
 "체인(hierarchical_delegation)의 검토 스텝이 단일 호출보다 실제로 품질을
 올리는가"를 한 번도 측정한 적 없다는 갭을 메우려고 만들었다. 같은 프롬프트를
-direct_call vs 체인으로 k회씩 실행하고, 두 조건 산출물에 동일한
-`judge.check_pass()`를 blind로 적용해 합격률/비용/지연을 비교한다. 모델을 전
+조건별로 k회씩 실행하고, 산출물에 동일한 `judge.check_pass()`를 blind로 적용해
+합격률/비용/지연을 비교한다. 모델을 전
 조건 gemini로 고정해 "구조 효과"만 분리(역할별 모델 특화는 별도 변수라 통제).
+
+**조건 4종**: `direct` / `chain`(3역할) / `departments`(5역할) / **`fan_out`**
+(2026-07-29 추가 — `FAN_OUT_CANDIDATES`개 후보 + judge). fan_out 후보도 같은 백엔드로
+만들기 때문에 이 조건이 답하는 건 "**여러 모델을 섞는 게 좋은가**"가 아니라 "**같은
+모델의 후보 N개를 judge가 고르고 합성하는 게 단발보다 나은가**"다 — 모델 다양성은
+별개의 미측정 변수로 남는다.
+
+**축이 둘이다**(2026-07-29): 합격률 + **조건 간 blind 정면 비교**(`head_to_head`,
+`--no-head-to-head`로 끔). 합격률 한 축은 3차에서 바닥 효과, 4차에서 천장 효과(9/9)에
+걸려 **조건을 구분하지 못했다.** 게다가 판정 기준
+(`docs/01_개념설명/harness-vs-ecc-decision-2026-07-ko.md` §6)이 "fan_out 합격률 >
+direct면 값 입증, ≈면 축소 결정"이라, direct가 이미 만점인 상태로 조건만 추가하면
+**rubric 인공물이 엔진 핵심을 지우는 결정을 촉발한다.** 정면 비교는 천장이 없고,
+엔진 자신의 `judge.evaluate`(blind 레이블 + 무작위 순서)를 그대로 쓴다.
+승패는 근접 임계값(`_MERGE_THRESHOLD`, 10점 — ADR 0011 이후 표시 전용)으로 뭉개지 않고 점수 높은 쪽을
+그대로 세되, 근소한 차였던 쌍 수를 따로 남긴다.
 실제 API 호출이라 `verify_judge_fault_injection.py`와 같은 이유로 `pytest
 tests/` 밖에 둔다. `--generator`/`--evaluator`로 백엔드를 고른다(기본 `auto`: gemini를 먼저 확인하고
 안 되면 claude). **측정 도중 백엔드가 바뀌면 즉시 중단한다** — 조건마다 모델이
@@ -187,12 +207,34 @@ tests/` 밖에 둔다. `--generator`/`--evaluator`로 백엔드를 고른다(기
 하나 나왔다). claude로 측정하려면 `DEFAULT_TIMEOUT_SEC`(120초) 조정이 선행돼야
 한다 — 이 프롬프트에서 타임아웃이 관측됐다.
 
-**2026-07-28 1차 측정 완료**(k=3, 전 조건 gemini): direct 3/3·28.3초 vs chain 2/3·37.3초 —
-체인이 우위를 보이지 못했고, 원인은 품질이 아니라 **체인의 final.md가 요청한
-산출물이 아니라 리뷰 코멘트**라는 구조였다(위 "아직 안 한 것" 1번). k=3·프롬프트
-1종이라 경향만 본 수준 — 한도가 풀리면 k와 task 유형을 늘려 재실행할 것.
-결과 원본은 `_workspace/measurements/`(gitignore 대상이라 숫자 기록은 진행상황
-문서에만 남는다).
+**측정 이력**(전부 k=3·전 조건 gemini 고정). 결과 원본은 `_workspace/measurements/`
+(gitignore 대상이라 숫자 기록은 `../docs/03_진행상황/`에만 남는다):
+
+| 회차 | 조건 | 결과 | 이 측정에서 안 것 |
+|---|---|---|---|
+| 1~3차 | direct/chain(/부서) | 못 쓸 데이터 | 매번 원인이 패턴이 아니라 **측정 장치**였다(리뷰 코멘트를 최종물로 냄 / 판정자가 rubric 밖 요건 발명 / 달성 불가 rubric 항목) |
+| 4차 | direct·chain·부서 | 9/9 전부 합격 | **천장 효과** — 체인은 우위 미입증(→ ADR 0009 강등), 단 "차이가 없다"가 아니라 "차이를 못 재는 측정"이었다 |
+| 5차 | direct·**fan_out** | 3/3 대 3/3, 정면 비교 fan_out 2승 1패 | 합격률이 **세 번째로** 구분 실패. 정면 비교 축을 처음 얻었지만 3쌍 중 2쌍이 근소한 차 → 결론 미결. 비용은 확정: **2.0배·지연 2.2배** |
+
+5차에서 **난이도가 병목**이라는 게 드러나서 6차는 `--prompt diagnostic`(5축 × 명령/해석/
+배제조건을 요구)으로 잰다. 쉬운 과제에서는 단발 호출로도 충분해 **구조의 값이 나타날
+자리가 없다.**
+
+`scripts/verify_measure_script.py` — **측정 스크립트를 mock으로 확인(2026-07-29, 비용 0).**
+측정 스크립트는 실제 API를 호출해서 `pytest tests/` 밖에 있고, 그래서 **로직 결함이
+돈을 쓴 뒤에야 드러났다** — 4차 때 `step_input_tokens`가 전부 `None`으로 나온 것,
+`direct`에만 그 키가 없어 증폭 배수를 못 구한 것, 역할이 늘어 `KeyError`로 죽은 것이
+전부 그랬다. 전 조건을 mock으로 한 바퀴 돌려 **측정 장치**만 검증한다(mock의 합격
+결과에는 의미가 없다): 결과 키 완비, 예상 호출 수 == 실제 호출 수, `fan_out` 후보
+산출물이 서로 덮어쓰이지 않는지, 정면 비교가 blind 레이블을 조건 이름으로 되돌리는지.
+
+도입 즉시 실제 결함 둘을 잡았다:
+1. **`chain` 조건이 체인을 재지 않았다** — ADR 0009로 키워드 라우팅이 전부
+   `fan_out_judge`가 되면서, constraints 없이 돌던 `run_chain`이 fan_out으로 갔다.
+   그대로 돌렸으면 `chain` 라벨로 fan_out 숫자를 기록했을 것이다. 이제 조건 함수가
+   패턴을 항상 명시한다
+2. **후보 산출물 헤더에 `input_tokens`가 없었다** — 체인 스텝 파일에는 있는데 후보
+   파일에는 빠진 비대칭(`model_runner._render_candidate_markdown`에서 수정)
 
 `scripts/new_domain.py` — 도메인 폴더 스캐폴딩 자동화(2026-07-16, ncp-snapshot-drill/
 centos-eol-migration 반복 절차 스크립트화). Fetcher/커스텀 실행 스크립트 없이
@@ -246,7 +288,7 @@ dashboard/failure_analysis/live_status → cli). CI 없는 프로젝트라 "린�
 검증**: `schemas.py`에 `from . import orchestrator`(역방향) 임시 추가 →
 테스트가 정확히 잡아내는 것 확인 후 원복.
 
-## 테스트 (415개, 전부 통과)
+## 테스트 (416개, 전부 통과)
 
 새 테스트 파일 추가/파일별 개수 변경 시 이 표도 같이 갱신(2026-07-24 문서
 감사에서 실제(239개)와 다른 옛 숫자(141개)로 오래 방치된 것 발견 —

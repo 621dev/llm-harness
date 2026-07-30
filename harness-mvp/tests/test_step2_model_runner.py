@@ -65,6 +65,23 @@ class ModelRunnerTest(unittest.TestCase):
             self.assertTrue(candidate_path.exists())
             self.assertIn(candidate.content, candidate_path.read_text(encoding="utf-8"))
 
+    def test_candidate_artifact_header_records_both_token_counts(self) -> None:
+        """후보 산출물 헤더에 입력/출력 토큰이 **둘 다** 남는가.
+
+        `Candidate.input_tokens`를 추가할 때(2026-07-29) 체인 스텝 파일에만 반영하고
+        후보 파일에는 빼먹었다 — 같은 정보인데 패턴에 따라 있고 없는 비대칭이었고,
+        그래서 `fan_out` 측정이 입력 규모를 산출물에서 읽을 수 없었다. 헤더 **필드**를
+        검사하는 테스트가 없어서 조용히 지나간 자리라 여기서 고정한다.
+        """
+        candidates = model_runner.run_all("설계안을 검토해줘", make_providers(), self.run_dir)
+
+        for candidate in candidates:
+            header = (self.run_dir / "artifacts" / "candidates" / f"{candidate.model_id}.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn(f"- tokens: {candidate.tokens}", header)
+            self.assertIn(f"- input_tokens: {candidate.input_tokens}", header)
+
     def test_provider_recovers_after_one_retry(self) -> None:
         providers = make_providers(fail_times={"model-a": 1})  # 1회 실패 후 재시도로 성공
 

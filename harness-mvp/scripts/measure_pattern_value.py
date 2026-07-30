@@ -1,4 +1,4 @@
-"""패턴 부가가치 측정: 단일 호출(direct) vs hierarchical_delegation 체인.
+"""패턴 부가가치 측정: 단일 호출(direct) vs 체인 vs fan_out_judge.
 
 배경(2026-07-27): 구조 효율성 검토에서 "체인의 검토 스텝이 단일 호출 대비
 품질을 실제로 올리는지 한 번도 측정한 적 없다"는 갭을 확인했다. 이 스크립트는
@@ -15,13 +15,19 @@ rubric 합격 판정(judge.check_pass, ADR 0006에서 추가)으로 품질을 �
     금액 축이 사라지지만 `subscription_calls`(호출 횟수)로 비교는 된다.
     Gemini 한도에 막혔을 때 쓰는 우회로.
 - 품질 판정은 두 조건 산출물에 같은 evaluator를 blind로 적용한다(evaluator는
-  어느 조건의 출력인지 모른다). 판정이 이분법(pass/fail)이라 미세한 품질 차이는
-  feedback 텍스트로만 관찰된다 — 한계로 명시.
+  어느 조건의 출력인지 모른다).
+- **축이 둘이다**(2026-07-29 추가): rubric 합격률 + **조건 간 blind 정면 비교**.
+  합격률 한 축만으로는 3차에서 바닥 효과(전부 탈락), 4차에서 천장 효과(9/9)에
+  걸려 **조건이 구분되지 않았다** — 품질 차이가 없다고 입증한 게 아니라 차이를
+  잴 수 없는 측정을 두 번 한 것이다. 정면 비교는 천장이 없다(`head_to_head`).
 - 실제 Gemini API를 호출하므로 의도적으로 `pytest tests/` 밖에 둔다(작업 규칙:
   자동 테스트는 실제 API/CLI 미호출. `verify_judge_fault_injection.py` 선례).
+  로직 자체는 `verify_measure_script.py`가 mock으로 확인한다(비용 0).
 
 사용법 (harness-mvp 디렉토리에서):
   PYTHONPATH=src python scripts/measure_pattern_value.py [--k 3]
+  PYTHONPATH=src python scripts/measure_pattern_value.py --conditions direct,fan_out
+  PYTHONPATH=src python scripts/measure_pattern_value.py --conditions direct,fan_out --prompt diagnostic
   PYTHONPATH=src python scripts/measure_pattern_value.py --generator claude --evaluator codex
 gemini를 쓰면 GEMINI_API_KEY, claude/codex를 쓰면 해당 CLI 로그인이 필요하다.
 
@@ -43,7 +49,7 @@ sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="repla
 
 from harness import cli as cli_module  # noqa: E402  (체인 역할 목록 재사용)
 from harness import judge, model_runner, orchestrator, run_store  # noqa: E402
-from harness.schemas import ProviderConfig, TaskInput  # noqa: E402
+from harness.schemas import Candidate, ProviderConfig, TaskInput  # noqa: E402
 from providers.api_provider import GeminiApiProvider  # noqa: E402
 from providers.base import Provider, ProviderError  # noqa: E402
 from providers.cli_subscription_provider import ClaudeCliProvider, CodexCliProvider  # noqa: E402
@@ -60,12 +66,47 @@ PACE_SECONDS = 25
 # pacing이 불필요하다 — 그대로 25초씩 쉬면 측정만 몇 배 느려진다.
 SUBSCRIPTION_PACE_SECONDS = 0
 
-# domains/server-engineering-learning의 실제 task(task.networking-basics.json)와
-# 동일한 프롬프트 — 생태적 타당성(실사용 프롬프트로 측정) 확보 목적.
-PROMPT = (
-    "초급 엔지니어가 이해할 수 있도록 서버 네트워킹 기초(방화벽, 포트, DNS)를 "
-    "리서치해줘. 그 다음 학습 자료 초안을 만들고 내용을 검토해줘."
-)
+# 프롬프트는 고르는 값이다(2026-07-29). 예전 측정은 `basic` 하나만 썼는데, 5차에서
+# **난이도가 측정의 병목**이라는 게 드러났다 — direct가 3/3 만점이라 합격률로는 어떤
+# 패턴도 그것을 넘을 수 없고(천장), 정면 비교에서도 3쌍 중 2쌍이 근소한 차였다.
+# 쉬운 프롬프트에서는 단발 호출로도 충분해서 **구조의 값이 나타날 자리가 없다.**
+#
+# 이전 프롬프트를 지우지 않고 남기는 이유: 1~5차 결과가 전부 `basic` 기준이라,
+# 지우면 과거 숫자와 새 숫자를 비교할 수 없게 된다.
+_PROMPTS: dict[str, str] = {
+    # domains/server-engineering-learning의 실제 task(task.networking-basics.json)와
+    # 동일한 프롬프트 — 생태적 타당성(실사용 프롬프트로 측정) 확보 목적.
+    # 1~5차 측정이 전부 이걸 썼다.
+    "basic": (
+        "초급 엔지니어가 이해할 수 있도록 서버 네트워킹 기초(방화벽, 포트, DNS)를 "
+        "리서치해줘. 그 다음 학습 자료 초안을 만들고 내용을 검토해줘."
+    ),
+    # 6차용(2026-07-29 신설). 같은 도메인(서버 엔지니어링)을 유지하면서 난이도를 올린다.
+    #
+    # **어디에 압력을 주는지가 설계의 핵심이다** — rubric은 planner와 일치해야 해서
+    # (`MeasurementRubricConsistencyTest`) 바꿀 수 없으므로, 그 두 항목이 실제로
+    # 걸리도록 프롬프트를 만든다:
+    #   - `핵심 정보 커버리지` ← 다뤄야 할 축을 5개로 못 박는다. 단발 호출이 한두 개를
+    #     빠뜨릴 여지가 생긴다(빠뜨리면 판정자가 항목을 지목할 수 있다)
+    #   - `구체성` ← 축마다 실행 명령 + 출력 해석 + **배제 조건**까지 요구한다.
+    #     "방화벽을 확인하세요" 수준으로는 못 넘어간다
+    #
+    # 바닥 효과(3차)를 피하려고 두 가지를 지켰다: (1) 웹 접근이 필요한 요구는 없다 —
+    # 표준 리눅스 도구 지식만으로 답할 수 있다, (2) 요구가 많을 뿐 각 요구 자체는
+    # 평범하다. 3차가 무의미해진 건 요구가 많아서가 아니라 **달성 불가능한 항목**이
+    # 있어서였다.
+    "diagnostic": (
+        "사내 웹 서비스가 특정 시간대에만 간헐적으로 접속 실패한다. 원인을 좁혀 나가는 "
+        "진단 절차서를 작성해줘. 방화벽, 포트/리스닝 상태, DNS, 커넥션 한도, TLS 인증서 "
+        "만료 다섯 축을 모두 다루고, 축마다 (1) 실행할 구체적인 명령, (2) 그 출력을 "
+        "어떻게 읽는지, (3) 어떤 결과가 나오면 그 축은 원인이 아니라고 배제할 수 있는지를 "
+        "써라. 간헐적 실패라는 조건에서 한 번의 정상 결과가 왜 무죄 증명이 되지 못하는지도 "
+        "짚어줘. 초급 엔지니어가 그대로 따라 실행할 수 있어야 한다."
+    ),
+}
+
+# 실행 중에 정해진다(main에서 --prompt로 설정). 조건 함수들이 호출 시점에 읽는다.
+PROMPT = _PROMPTS["basic"]
 # planner._DEFAULT_RUBRICS["research"]와 동일 — 체인 조건에서 planner가 고르는
 # rubric을 단일 조건에도 똑같이 적용해 판정 기준을 통일한다.
 RUBRIC = ["핵심 정보 커버리지", "구체성"]
@@ -91,8 +132,8 @@ def _make(backend: str, provider_id: str) -> Provider:
     if backend == "gemini":
         return GeminiApiProvider(config)
     if backend == "claude":
-        return ClaudeCliProvider(config)
-    return CodexCliProvider(config)
+        return ClaudeCliProvider(config, timeout_sec=SUBSCRIPTION_TIMEOUT_SEC)
+    return CodexCliProvider(config, timeout_sec=SUBSCRIPTION_TIMEOUT_SEC)
 
 
 # 실행 중 대체가 일어났는지 확인하려고 만들어진 wrapper를 모아둔다.
@@ -122,6 +163,46 @@ def _with_safety_net(backend: str, provider_id: str) -> Provider:
     )
     _FALLBACK_WRAPPERS.append(wrapper)
     return wrapper
+
+
+class _LabeledProvider(Provider):
+    """같은 백엔드를 여러 후보 슬롯으로 쓸 때 `model_id`만 구분해주는 위임 wrapper.
+
+    `fan_out` 조건은 후보 N개를 **같은 백엔드**로 만든다(구조 효과와 모델 효과 분리 —
+    이 스크립트의 기본 원칙). 그런데 엔진은 `Candidate.model_id`를 두 곳에서 식별자로
+    쓴다:
+
+    - `artifacts/candidates/{model_id}.md` 파일명 → 같으면 **서로 덮어쓴다**
+    - `JudgingScore.candidate`와 `Judging.winner` → 같으면 **누가 이겼는지 구분 불가**
+
+    그래서 슬롯 번호를 붙여 구분한다. 판정은 여전히 blind다 — `judge._build_prompt`는
+    레이블(A/B/…)과 본문만 쓰고 `model_id`를 프롬프트에 넣지 않는다(확인 후 사용).
+
+    **`auth_mode`를 반드시 위임한다.** wrapper 자신의 config를 보고하면 구독 provider가
+    종량제로 보여서 `_limit_subscription_candidates`와 `subscription_calls` 집계가
+    둘 다 조용히 틀린다 — 2026-07-28과 07-29에 각각 다른 자리에서 같은 버그를 냈다.
+    """
+
+    def __init__(self, inner: Provider, slot: int) -> None:
+        super().__init__(
+            ProviderConfig(
+                provider_id=f"{inner.provider_id}-c{slot}",
+                model_id=f"{inner.model_id}-c{slot}",
+                auth_mode=inner.auth_mode,
+            )
+        )
+        self._inner = inner
+
+    @property
+    def auth_mode(self) -> str:
+        return self._inner.auth_mode
+
+    def generate(self, prompt: str, *, temperature: float = 0.7):
+        # **반환된 Candidate의 model_id까지 바꿔야 한다.** model_runner는 provider가
+        # 만든 Candidate를 그대로 돌려주므로(`generate_with_retry`), 여기서 갈아주지
+        # 않으면 안쪽 provider의 이름이 그대로 남아 위 두 충돌이 그대로 재현된다.
+        candidate = self._inner.generate(prompt, temperature=temperature)
+        return candidate.model_copy(update={"model_id": self.model_id})
 
 
 def _generator(provider_id: str) -> Provider:
@@ -207,9 +288,14 @@ def run_chain(attempt: int, root: Path, *, roles: tuple[str, ...] | None = None,
     """
     providers: dict = {pid: _generator(pid) for pid in _CHAIN_ROLE_PROVIDER_IDS}
     providers[orchestrator.JUDGE_PROVIDER_KEY] = _evaluator("judge")
-    constraints = (
-        ["team_pattern:hierarchical_delegation", f"delegation_roles:{','.join(roles)}"] if roles else []
-    )
+    # **패턴을 항상 명시한다.** 예전엔 `roles`가 없으면 constraints를 비워서 planner의
+    # 키워드 라우팅에 맡겼는데, ADR 0009(2026-07-29)로 **키워드 라우팅이 전부
+    # `fan_out_judge`로 바뀌면서 이 조건이 체인을 재지 않게 됐다** — mock 검증이 그날
+    # 바로 잡았다. 안 잡혔으면 `chain` 라벨로 fan_out 숫자를 측정해 체인 결과로
+    # 기록했을 것이다. 측정 조건은 라우팅 규칙 변경에 흔들려선 안 된다.
+    constraints = ["team_pattern:hierarchical_delegation"]
+    if roles:
+        constraints.append(f"delegation_roles:{','.join(roles)}")
     task = TaskInput(task_id=f"measure-{label}-{attempt}", prompt=PROMPT, constraints=constraints)
     observation = orchestrator.run(task, providers, root=root)
     run_dir = root / f"run-measure-{label}-{attempt}"
@@ -257,16 +343,119 @@ def _step_input_tokens(run_dir: Path, plan: dict) -> list[int | None]:
     return values
 
 
-# 측정할 수 있는 조건. 새 조건을 추가하려면 여기와 `_run_condition`만 손대면 된다.
+# 조건 D(fan_out_judge)의 후보 수. 2026-07-29에 추가 — 이 패턴은 기계 장치가 가장
+# 많은데(judge + synthesizer + blind 익명화 + 구독 후보 상한) 그때까지 **비교 측정
+# 0회**였다.
 #
-# `fan_out`이 없는 게 눈에 띄어야 한다 — **기계 장치가 가장 많은 패턴
-# (judge + synthesizer + blind 익명화)이 비교 측정 0회다.** 별도 항목으로 남겨뒀다
-# (`docs/01_개념설명/harness-vs-ecc-decision-2026-07-ko.md` §6의 4차 측정).
-CONDITIONS = ("direct", "chain", "departments")
+# **후보를 전부 같은 백엔드로 만든다** — 다른 조건들과 같은 원칙(구조 효과와 모델
+# 효과 분리)이다. 그래서 이 조건이 답하는 질문은 "**여러 모델을 섞는 게 좋은가**"가
+# 아니라 "**같은 모델의 후보 N개를 만들어 judge가 고르고 합성하는 게 단발보다
+# 나은가**"다. `run_all`이 temperature=0.7로 부르므로 후보는 실제로 서로 다르다.
+#
+# 모델 다양성 효과는 **별개의 미측정 변수로 남는다** — 운영 config는 claude+codex를
+# 섞는데(§8) 이 측정은 그걸 검증하지 않는다. 결과를 인용할 때 반드시 함께 말할 것.
+FAN_OUT_CANDIDATES = 2
+
+
+# 조건 E(모델 다양성)의 후보 백엔드. `--fan-out-models`로 바꾼다.
+#
+# **이 조건만이 운영 config가 실제로 쓰는 구성을 검증한다.** 5·6차(ADR 0010)는 후보를
+# 전부 같은 백엔드로 만들어 "후보 N개 + judge + 합성"의 값까지만 확인했고, `fan_out_judge`
+# 라는 이름이 원래 주장하는 **다모델 비교**는 미검증으로 남았다.
+#
+# 비교 상대는 `direct`가 아니라 **`fan_out`(동일 모델 후보)**이다 — 구조를 고정하고
+# 모델 구성만 바꿔야 다양성의 효과가 분리된다. `direct`와 비교하면 구조 효과와 다양성
+# 효과가 섞여서 어느 쪽이 기여했는지 말할 수 없다.
+MIXED_FAN_OUT_BACKENDS: tuple[str, ...] = ("claude", "codex")
+
+# 구독 CLI 측정용 타임아웃. 엔진 기본값(`DEFAULT_TIMEOUT_SEC` 120초)으로는 이 측정이
+# 위험하다 — `diagnostic` 프롬프트는 긴 산출물을 요구하고, claude CLI가 예전에 이보다
+# 짧은 프롬프트에서도 타임아웃한 적이 있다(v20 §11). 엔진 기본값을 건드리지 않고
+# 측정에서만 늘린다: 타임아웃으로 죽은 시도는 데이터가 아니라 잡음이다.
+SUBSCRIPTION_TIMEOUT_SEC = 420.0
+
+
+def run_fan_out(
+    attempt: int,
+    root: Path,
+    *,
+    backends: tuple[str, ...] | None = None,
+    label: str = "fan_out",
+) -> dict:
+    """조건 D/E: orchestrator를 통해 fan_out_judge 실행.
+
+    `backends`를 주면 후보를 그 백엔드들로 만든다(조건 E — 모델 다양성). 안 주면
+    `--generator` 백엔드를 후보 수만큼 복제한다(조건 D — 구조 효과만).
+
+    후보 provider를 `_LabeledProvider`로 감싸는 이유는 그쪽 docstring 참고 —
+    같은 백엔드를 N개 슬롯으로 쓰면 `model_id`가 겹쳐서 산출물 파일과 승자 판정이
+    둘 다 망가진다. 백엔드가 서로 다르면 겹치지 않지만, **조건 간 산출물 이름 규칙을
+    같게 유지**하려고 양쪽 다 감싼다.
+    """
+    slots = backends if backends is not None else (_GENERATOR_BACKEND,) * FAN_OUT_CANDIDATES
+    providers: dict = {
+        f"cand-{i}": _LabeledProvider(_with_safety_net(backend, f"cand-{i}"), i)
+        for i, backend in enumerate(slots, start=1)
+    }
+    providers[orchestrator.JUDGE_PROVIDER_KEY] = _evaluator("judge")
+    # fan_out_judge는 기본 패턴이지만 측정에서는 명시한다 — 라우팅 규칙이 나중에
+    # 바뀌어도 이 조건이 조용히 다른 패턴을 재게 되는 일이 없어야 한다.
+    task = TaskInput(
+        task_id=f"measure-{label}-{attempt}",
+        prompt=PROMPT,
+        constraints=["team_pattern:fan_out_judge"],
+    )
+    observation = orchestrator.run(task, providers, root=root)
+    run_dir = root / f"run-measure-{label}-{attempt}"
+    ok = observation.status in ("success", "warning") and (run_dir / "final.md").exists()
+    metrics = run_store.read_json(run_dir, "metrics.json")
+    return {
+        "condition": label,
+        "attempt": attempt,
+        "ok": ok,
+        "content": run_store.read_markdown(run_dir, "final.md") if ok else "",
+        "latency_ms": metrics["latency_ms"],
+        "cost_usd": metrics["estimated_cost_usd"],
+        "subscription_calls": metrics.get("subscription_calls", 0),
+        "llm_calls": len(slots) + 1,  # 후보 N + judge 1
+        # 어느 백엔드 조합으로 잰 건지 남긴다 — 다양성 조건은 이게 곧 측정 대상이다.
+        "roles": list(slots),
+        # 체인과 달리 fan_out은 입력이 **누적되지 않는다** — 후보마다 같은 프롬프트를
+        # 독립적으로 받는다. 그 구조 차이가 숫자로 보이도록 같은 키에 담는다.
+        "step_input_tokens": _candidate_input_tokens(run_dir),
+    }
+
+
+def _candidate_input_tokens(run_dir: Path) -> list[int | None]:
+    """후보 산출물 헤더의 `- input_tokens:`를 전부 뽑는다(파일명은 model_id)."""
+    candidates_dir = run_dir / "artifacts" / "candidates"
+    if not candidates_dir.is_dir():
+        return []
+    values: list[int | None] = []
+    for path in sorted(candidates_dir.glob("*.md")):
+        try:
+            line = next(
+                ln for ln in path.read_text(encoding="utf-8").splitlines()
+                if ln.startswith("- input_tokens:")
+            )
+            values.append(int(line.split(":", 1)[1].strip()))
+        except (OSError, StopIteration, ValueError):
+            values.append(None)
+    return values
+
+
+# 측정할 수 있는 조건. 새 조건을 추가하려면 여기와 `_run_condition`만 손대면 된다.
+CONDITIONS = ("direct", "chain", "departments", "fan_out", "fan_out_mixed")
 
 
 # 조건별 시도당 LLM 호출 수(생성 + 판정 1회). 시작 전에 규모를 보여주기 위한 추정이다.
-_CALLS_PER_ATTEMPT = {"direct": 1 + 1, "chain": 3 + 1, "departments": len(DEPARTMENT_ROLES) + 1}
+_CALLS_PER_ATTEMPT = {
+    "direct": 1 + 1,
+    "chain": 3 + 1,
+    "departments": len(DEPARTMENT_ROLES) + 1,
+    "fan_out": FAN_OUT_CANDIDATES + 1 + 1,  # 후보 N + judge 1 + 합격 판정 1
+    "fan_out_mixed": len(MIXED_FAN_OUT_BACKENDS) + 1 + 1,
+}
 
 
 def _estimate_total_calls(conditions: list[str], k: int) -> int:
@@ -280,6 +469,12 @@ def _run_condition(label: str, attempt: int, chain_root: Path) -> dict:
         return run_chain(attempt, chain_root)
     if label == "departments":
         return run_chain(attempt, chain_root, roles=DEPARTMENT_ROLES, label="departments")
+    if label == "fan_out":
+        return run_fan_out(attempt, chain_root)
+    if label == "fan_out_mixed":
+        return run_fan_out(
+            attempt, chain_root, backends=MIXED_FAN_OUT_BACKENDS, label="fan_out_mixed"
+        )
     raise ValueError(f"알 수 없는 조건: {label!r} (사용 가능: {list(CONDITIONS)})")
 
 
@@ -326,6 +521,102 @@ def summarize(results: list[dict], condition: str) -> dict:
     }
 
 
+def head_to_head(results: list[dict], conditions: list[str], *, pace: int) -> list[dict]:
+    """기준 조건과 나머지를 **blind로 정면 비교**한다. 합격률과 별개의 축이다.
+
+    **왜 필요한가**: 판정 기준(`harness-vs-ecc-decision-2026-07-ko.md` §6)은
+    "fan_out 합격률 > direct면 값 입증, ≈면 축소 결정"인데 **4차 측정에서 direct가
+    이미 3/3(천장)이었다.** 그 상태로 조건만 추가하면 `>`가 원리적으로 불가능하고
+    `≈`가 확정적으로 나온다 — **rubric 인공물이 엔진 핵심을 지우는 결정을 촉발한다.**
+    3차는 바닥 효과, 4차는 천장 효과였으니 pass/fail 한 축만으로는 세 번째 측정도
+    같은 운명이다.
+
+    정면 비교는 천장이 없다 — 둘 다 "합격"이어도 어느 쪽이 나은지는 갈린다.
+    **엔진 자신의 judge를 그대로 쓴다**(`judge.evaluate`): blind 레이블(A/B) + 무작위
+    순서로 position/identity bias를 이미 다루고 있고, 측정용으로 판정자를 새로 만들면
+    "측정에 쓴 판정자와 엔진이 쓰는 판정자가 다르다"는 문제가 생긴다.
+
+    한계: n이 작으면 2-1 같은 결과는 신호가 아니다. 그리고 이건 **선호 비교**라
+    "얼마나 더 나은가"는 말하지 않는다.
+    """
+    baseline = "direct" if "direct" in conditions else conditions[0]
+    others = [c for c in conditions if c != baseline]
+    if not others:
+        return []
+
+    by_attempt: dict[tuple[str, int], dict] = {(r["condition"], r["attempt"]): r for r in results}
+    attempts = sorted({r["attempt"] for r in results})
+    pairs: list[dict] = []
+    for attempt in attempts:
+        base_row = by_attempt.get((baseline, attempt))
+        for other in others:
+            other_row = by_attempt.get((other, attempt))
+            if not (base_row and other_row and base_row["ok"] and other_row["ok"]):
+                continue
+            time.sleep(pace)
+            print(f"[정면 비교] {baseline} vs {other} #{attempt}")
+            # model_id를 조건 이름으로 둔다 — judge 프롬프트에는 레이블(A/B)과 본문만
+            # 들어가므로(`judge._build_prompt` 확인) blind는 유지된다. 판정 결과를
+            # 조건으로 되돌리기 위한 식별자일 뿐이다.
+            pair_candidates = [
+                Candidate(model_id=baseline, content=base_row["content"], status="success"),
+                Candidate(model_id=other, content=other_row["content"], status="success"),
+            ]
+            try:
+                judging = judge.evaluate(pair_candidates, RUBRIC, _evaluator("h2h"))
+            except (judge.JudgeError, ValueError) as exc:
+                pairs.append({"attempt": attempt, "baseline": baseline, "other": other,
+                              "winner": None, "error": str(exc)[:200]})
+                continue
+            scores = {s.candidate: s.score for s in judging.scores}
+            pairs.append({
+                "attempt": attempt,
+                "baseline": baseline,
+                "other": other,
+                "winner": judging.winner,
+                "scores": scores,
+                # 점수가 붙어 있으면 "이겼다"는 말의 무게가 다르다. 엔진 자신의 판단을
+                # 그대로 읽는다 — 예전엔 `recommended_strategy == "merge_top_candidates"`로
+                # 알아냈는데, ADR 0011로 그 전략이 없어지면서 전용 필드로 옮겨졌다.
+                "near_tie": judging.top_scores_near_tie,
+                "cost_usd": judging.cost_usd,
+                "subscription_calls": judging.subscription_calls,
+            })
+    return pairs
+
+
+def summarize_head_to_head(pairs: list[dict]) -> list[dict]:
+    """정면 비교를 조건별 승/패로 접는다.
+
+    **승패는 엔진의 병합 임계값을 쓰지 않는다.** `_MERGE_THRESHOLD`(0.1)는 "후보들을
+    합칠까"를 정하는 값이라 10점 미만 차이를 전부 근접으로 본다 — 그걸 승패 판정에
+    그대로 쓰면 웬만한 비교가 다 무승부가 되어 **천장 효과가 다른 형태로 재현된다**
+    (mock 검증에서 전 쌍이 무승부로 나와 확인했다). 여기서는 점수가 높은 쪽을 그대로
+    승자로 세고, 임계값 안에 든 쌍은 **별도 칸에 참고로만** 남긴다 — 승패가 근소한지
+    아닌지는 읽는 사람이 판단할 정보이고, 미리 뭉개면 정보가 사라진다.
+    """
+    summaries = []
+    for other in sorted({p["other"] for p in pairs}):
+        rows = [p for p in pairs if p["other"] == other and p.get("winner")]
+        if not rows:
+            continue
+        baseline = rows[0]["baseline"]
+        summaries.append({
+            "baseline": baseline,
+            "other": other,
+            "compared": len(rows),
+            "other_wins": sum(1 for p in rows if p["winner"] == other),
+            "baseline_wins": sum(1 for p in rows if p["winner"] == baseline),
+            # 참고용: 엔진이 "합칠 만큼 근접"으로 본 쌍 수(승패 계산에는 안 쓴다)
+            "within_engine_tie_band": sum(1 for p in rows if p["near_tie"]),
+            "avg_score_baseline": round(
+                sum(p["scores"].get(baseline, 0) for p in rows) / len(rows), 3),
+            "avg_score_other": round(
+                sum(p["scores"].get(other, 0) for p in rows) / len(rows), 3),
+        })
+    return summaries
+
+
 def _avg_input_tokens(rows: list[dict]) -> int | None:
     per_attempt = [
         sum(t for t in row["step_input_tokens"] if t is not None)
@@ -336,6 +627,9 @@ def _avg_input_tokens(rows: list[dict]) -> int | None:
 
 
 def main() -> None:
+    # 선언이 첫 사용보다 위여야 한다 — argparse 기본값이 MIXED_FAN_OUT_BACKENDS를 읽는다.
+    global _GENERATOR_BACKEND, _EVALUATOR_BACKEND, PROMPT, MIXED_FAN_OUT_BACKENDS
+
     parser = argparse.ArgumentParser(description="단일 호출 vs 체인 품질/비용 측정")
     parser.add_argument("--k", type=int, default=3, help="조건당 반복 횟수 (기본 3)")
     parser.add_argument(
@@ -352,7 +646,33 @@ def main() -> None:
         help=(
             f"측정할 조건, 콤마 구분 (사용 가능: {','.join(CONDITIONS)}). "
             "기본 'direct,chain' — 1·2차 측정과 같은 조건이라 그대로 비교할 수 있다. "
-            "'departments'를 넣으면 5부서 체인까지 본다(호출이 시도당 6회 더 늘어난다)"
+            "'departments'를 넣으면 5부서 체인까지 본다(호출이 시도당 6회 더 늘어난다). "
+            f"'fan_out'은 후보 {FAN_OUT_CANDIDATES}개 + judge로 fan_out_judge를 잰다"
+        ),
+    )
+    parser.add_argument(
+        "--prompt", default="basic", choices=sorted(_PROMPTS),
+        help=(
+            "측정에 쓸 프롬프트. 기본 'basic'(1~5차와 동일 — 과거 숫자와 비교 가능). "
+            "'diagnostic'은 난이도를 올린 6차용 — 5차에서 direct가 만점이라 어떤 패턴도 "
+            "합격률로 그것을 넘을 수 없었고, 쉬운 과제에서는 구조의 값이 나타날 자리가 없다"
+        ),
+    )
+    parser.add_argument(
+        "--fan-out-models", default=",".join(MIXED_FAN_OUT_BACKENDS),
+        help=(
+            "'fan_out_mixed' 조건의 후보 백엔드, 콤마 구분 (기본 "
+            f"'{','.join(MIXED_FAN_OUT_BACKENDS)}' — 운영 config의 candidate_models와 같다). "
+            "이 조건만이 '모델을 섞는 게 값이 있나'를 잰다. 비교 상대는 direct가 아니라 "
+            "fan_out(동일 모델 후보)이어야 구조 효과와 다양성 효과가 분리된다"
+        ),
+    )
+    parser.add_argument(
+        "--no-head-to-head", action="store_true",
+        help=(
+            "기준 조건과의 blind 정면 비교를 생략한다. 기본은 실행 — 합격률만으로는 "
+            "천장/바닥 효과에 걸려 조건이 구분되지 않는다는 게 3·4차 측정에서 드러났다"
+            " (호출이 (조건수-1)×k회 늘어난다)"
         ),
     )
     parser.add_argument(
@@ -370,7 +690,22 @@ def main() -> None:
     if unknown:
         raise SystemExit(f"[fatal] 알 수 없는 조건: {unknown} (사용 가능: {list(CONDITIONS)})")
 
-    global _GENERATOR_BACKEND, _EVALUATOR_BACKEND
+    PROMPT = _PROMPTS[args.prompt]
+    MIXED_FAN_OUT_BACKENDS = tuple(b.strip() for b in args.fan_out_models.split(",") if b.strip())
+    unknown_backends = [b for b in MIXED_FAN_OUT_BACKENDS if b not in _BACKENDS]
+    if unknown_backends:
+        raise SystemExit(f"[fatal] 알 수 없는 백엔드: {unknown_backends} (사용 가능: {sorted(_BACKENDS)})")
+    _CALLS_PER_ATTEMPT["fan_out_mixed"] = len(MIXED_FAN_OUT_BACKENDS) + 1 + 1
+
+    # **구독 후보 상한을 측정 의도에 맞춰 명시한다.** 이 스크립트는 `cli.py`를 지나지
+    # 않으므로 `orchestrator.MAX_SUBSCRIPTION_CANDIDATES`의 모듈 기본값(1)이 적용된다.
+    # 구독 백엔드로 후보 2개를 만들면 상한이 1개로 깎으려 하고, 그러면 MIN_CANDIDATES(2)
+    # 미만이 되어 **가드가 상한을 무시해준 덕에** 어쩌다 2개가 도는 상태가 된다.
+    # 우연에 기대면 가드가 바뀌는 순간 측정이 조용히 후보 1개로 줄어든다 — 그건 fan_out이
+    # 아니라 direct다.
+    orchestrator.MAX_SUBSCRIPTION_CANDIDATES = max(
+        FAN_OUT_CANDIDATES, len(MIXED_FAN_OUT_BACKENDS)
+    )
     # auto면 시작 전에 gemini를 한 번 확인해서 백엔드를 정한다 — 호출마다 갈아타면
     # 조건별 모델이 달라져 비교가 성립하지 않는다(_resolve_backend 참고).
     if "auto" in (args.generator, args.evaluator):
@@ -381,11 +716,16 @@ def main() -> None:
     pace = args.pace_seconds if args.pace_seconds is not None else _pace_seconds()
     print(
         f"generator={_GENERATOR_BACKEND} / evaluator={_EVALUATOR_BACKEND} / "
-        f"호출 간격 {pace}초 / 조건 {conditions}"
+        f"호출 간격 {pace}초 / 조건 {conditions} / 프롬프트 {args.prompt!r}"
+        + (f" / 다양성 후보 {list(MIXED_FAN_OUT_BACKENDS)}" if "fan_out_mixed" in conditions else "")
     )
     # 호출 수를 미리 보여준다 — 종량제 키로 바뀐 뒤에는 "몇 번 부르는지"가 곧 금액이라,
     # 시작 전에 규모를 알고 중단할 수 있어야 한다.
-    print(f"예상 LLM 호출: 약 {_estimate_total_calls(conditions, args.k)}회 (판정 포함)")
+    h2h_calls = 0 if args.no_head_to_head else args.k * max(0, len(conditions) - 1)
+    print(
+        f"예상 LLM 호출: 약 {_estimate_total_calls(conditions, args.k) + h2h_calls}회 (판정 포함"
+        + (f", 정면 비교 {h2h_calls}회 포함)" if h2h_calls else ")")
+    )
     if _uses_subscription():
         print("주의: 구독(claude/codex) 호출이라 $ 비용 대신 구독 한도를 소모한다.")
     print()
@@ -427,6 +767,10 @@ def main() -> None:
 
     summaries = [summarize(results, label) for label in conditions]
 
+    # 정면 비교는 모든 조건이 끝난 뒤에 한다 — 같은 시도끼리 짝지어야 하기 때문이다.
+    h2h_pairs = [] if args.no_head_to_head else head_to_head(results, conditions, pace=pace)
+    h2h_summaries = summarize_head_to_head(h2h_pairs)
+
     print("\n## 결과 요약")
     for s in summaries:
         print(
@@ -443,14 +787,34 @@ def main() -> None:
         flag = "" if r.get("passed") or r.get("unmet_rubric_items") else " [rubric 미지정!]"
         print(f"- {r['condition']} #{r['attempt']}: passed={r['passed']}{flag} {head}")
 
+    if h2h_summaries:
+        print("\n## 정면 비교 (blind, 기준 조건 대비 — 합격률의 천장을 우회하는 축)")
+        for s in h2h_summaries:
+            print(
+                f"- {s['other']} vs {s['baseline']}: {s['other']} 승 {s['other_wins']} / "
+                f"{s['baseline']} 승 {s['baseline_wins']} "
+                f"(그중 근소한 차 {s['within_engine_tie_band']}쌍, "
+                f"비교 {s['compared']}쌍, 평균 점수 "
+                f"{s['other']} {s['avg_score_other']} vs {s['baseline']} {s['avg_score_baseline']})"
+            )
+    elif not args.no_head_to_head:
+        print("\n## 정면 비교: 비교 가능한 쌍이 없었다(양쪽 다 성공한 시도 없음)")
+
     out_path = measure_root / f"pattern_value_{stamp}.json"
     out_path.write_text(
-        json.dumps({"prompt": PROMPT, "rubric": RUBRIC, "k": args.k, "conditions": conditions,
+        json.dumps({"prompt_name": args.prompt, "prompt": PROMPT, "rubric": RUBRIC, "k": args.k, "conditions": conditions,
                     "generator": _GENERATOR_BACKEND, "evaluator": _EVALUATOR_BACKEND,
                     "requested_generator": args.generator, "requested_evaluator": args.evaluator,
                     "pace_seconds": pace,
+                    "fan_out_candidates": FAN_OUT_CANDIDATES if "fan_out" in conditions else None,
+                    "mixed_fan_out_backends": (
+                        list(MIXED_FAN_OUT_BACKENDS) if "fan_out_mixed" in conditions else None
+                    ),
                     "fallback_used": any(w.used_fallback for w in _FALLBACK_WRAPPERS),
-                    "summaries": summaries, "results": results}, ensure_ascii=False, indent=2),
+                    "summaries": summaries,
+                    "head_to_head_summaries": h2h_summaries,
+                    "head_to_head_pairs": h2h_pairs,
+                    "results": results}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     print(f"\n[ok] 전체 결과 저장: {out_path}")

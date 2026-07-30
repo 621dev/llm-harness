@@ -295,7 +295,8 @@ Section 12.1 연장선)을 따른다. 즉 "무한정 다시 시도"는 없고, �
 ### Step 6. Judge / Synthesizer (Fan-out/Judge 전용) — 완료
 - [x] `judge.py`: rubric 기반 점수화 로직 (규칙 기반 mock judge — rubric 키워드 매칭 +
       응답 길이 보조 지표)
-- [x] judging.json 저장, winner/strategy(`adopt_winner`/`merge_top_candidates`) 결정
+- [x] judging.json 저장, winner/strategy(`adopt_winner`/`single_candidate`) 결정
+      — `merge_top_candidates`는 ADR 0011로 폐기(final.md가 문서 두 개가 됐다)
 - [x] `synthesizer.py`: winner 후보 기반 + 상위 2개 후보 병합 템플릿, final.md 저장
 
 ### Step 7. Safety Evaluator (공통) — 완료

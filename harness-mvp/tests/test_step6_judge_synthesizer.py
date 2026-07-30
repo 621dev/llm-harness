@@ -56,13 +56,20 @@ class JudgeTest(unittest.TestCase):
         weaknesses_by_candidate = {s.candidate: s.weaknesses for s in judging.scores}
         self.assertIn("내용이 부실함", weaknesses_by_candidate["model-b"])
 
-    def test_close_scores_recommend_merge(self) -> None:
+    def test_close_scores_are_flagged_but_still_adopt_a_single_winner(self) -> None:
+        """근소한 우열은 **표시만** 되고 전략은 여전히 승자 채택이다 (ADR 0011).
+
+        예전엔 이 조건이 `"merge_top_candidates"`를 만들어 상위 두 후보를 이어붙였다.
+        근소하다는 건 어느 쪽을 써도 비슷하다는 뜻인데 둘을 붙여버려서 final.md가
+        완결된 문서 두 개가 됐다 — 신호는 남기고 병합만 없앤다.
+        """
         a = Candidate(model_id="model-a", content="비슷한 길이의 답변 A " * 5, status="success")
         b = Candidate(model_id="model-b", content="비슷한 길이의 답변 B " * 5, status="success")
 
         judging = judge.evaluate([a, b], rubric=["명확성"], judge_provider=make_judge())
 
-        self.assertEqual(judging.recommended_strategy, "merge_top_candidates")
+        self.assertTrue(judging.top_scores_near_tie)
+        self.assertEqual(judging.recommended_strategy, "adopt_winner")
 
     def test_clear_winner_recommends_adopt(self) -> None:
         strong = Candidate(model_id="model-a", content="충분히 길고 근거가 있는 답변 " * 10, status="success")
@@ -247,18 +254,26 @@ class SynthesizerTest(unittest.TestCase):
 
         self.assertEqual(result, candidates[0].content)
 
-    def test_merge_strategy_combines_top_two_contents(self) -> None:
+    def test_near_tie_never_concatenates_two_candidates(self) -> None:
+        """근소한 우열에서도 최종 답변은 **후보 하나**다 (ADR 0011의 회귀 방지).
+
+        7차 측정에서 12개 fan_out run 중 9개가 병합됐고, 판정자가 "요청은 절차서
+        하나인데 두 개를 줬다"며 불합격시켰다. 병합은 완결된 문서 두 개를 이어붙이는
+        것이었고 **어떤 요청 형식에서도 성립하지 않는다** — 여기서 되돌아오는 걸 막는다.
+        """
         candidates = [
             Candidate(model_id="model-a", content="비슷한 길이의 답변 A " * 5, status="success"),
             Candidate(model_id="model-b", content="비슷한 길이의 답변 B " * 5, status="success"),
         ]
         judging = judge.evaluate(candidates, rubric=["명확성"], judge_provider=make_judge())
-        self.assertEqual(judging.recommended_strategy, "merge_top_candidates")  # 전제 확인
+        self.assertTrue(judging.top_scores_near_tie)  # 전제 확인: 예전에 병합됐던 조건
 
         result = synthesizer.synthesize(candidates, judging)
 
-        self.assertIn(candidates[0].content, result)
-        self.assertIn(candidates[1].content, result)
+        self.assertEqual(result, next(c.content for c in candidates if c.model_id == judging.winner))
+        # 패자 본문이 섞여 들어오지 않는다(이어붙임의 직접 증거).
+        loser = next(c for c in candidates if c.model_id != judging.winner)
+        self.assertNotIn(loser.content, result)
 
 
 if __name__ == "__main__":

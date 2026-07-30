@@ -129,6 +129,14 @@ class Judging(BaseModel):
     scores: list[JudgingScore]
     recommended_strategy: str
     winner: str
+    # 1·2등 점수가 판정자가 구분하기 어려울 만큼 붙어 있었나 (2026-07-29, ADR 0011).
+    #
+    # 예전엔 이 상태를 `recommended_strategy="merge_top_candidates"`로 표현하고
+    # synthesizer가 상위 두 후보를 이어붙였는데, 그러면 **final.md가 완결된 문서 두 개**가
+    # 됐다(7차 측정에서 "절차서 하나"를 요구한 프롬프트를 위반해 불합격). 병합은 폐기했지만
+    # **"판정자가 못 갈랐다"는 신호 자체는 버리지 않는다** — 측정이 이걸 읽고 있고,
+    # 우열이 근소한 run을 사후에 구분할 수 있어야 한다.
+    top_scores_near_tie: bool = False
     latency_ms: Optional[int] = None
     cost_usd: Optional[float] = None
     subscription_calls: int = 0  # judge 호출이 구독 provider였다면 그 횟수
