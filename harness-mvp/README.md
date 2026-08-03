@@ -33,7 +33,7 @@ ADR 0011(후보 병합 폐기 — final.md가 문서 두 개가 되던 결함).
 cd harness-mvp
 pip install -e .[dev]                                     # pydantic + pytest 설치
 
-python -m pytest tests/ -v                                # 416개, 전부 mock — 실제 CLI/API 미호출
+python -m pytest tests/ -v                                # 420개, 전부 mock — 실제 CLI/API 미호출
 
 PYTHONPATH=src python -m harness.cli run --task examples/task.fan_out.json
 PYTHONPATH=src python -m harness.cli run --task examples/task.fan_out.json --models claude,gemini  # 이 실행만 후보 모델 오버라이드(codex 제외)
@@ -220,6 +220,29 @@ tests/` 밖에 둔다. `--generator`/`--evaluator`로 백엔드를 고른다(기
 배제조건을 요구)으로 잰다. 쉬운 과제에서는 단발 호출로도 충분해 **구조의 값이 나타날
 자리가 없다.**
 
+`tests/test_docs_references.py` — **문서의 참조·설정값이 실제와 일치하는지 검사
+(2026-08-03 신설).** 작업 규칙의 "감시는 사람 기억이 아니라 테스트로 한다"를 서술문에도
+적용한 것. 기존 기계적 점검(테스트 개수, 모듈 크기, import 계층, rubric 일치)은 전부
+**코드↔코드**만 봤고, **문서가 가리키는 것이 아직 존재하는지**는 아무도 안 봤다 —
+2026-08-03 하루에 낡은 서술을 다섯 건 손으로 찾아 고친 뒤 도입했다. 검사 4종:
+
+- **`vN §M` 포인터가 최신 인수인계 문서를 가리키는가** — 옛 버전은 삭제되는 규칙이라
+  이전 버전 번호가 남은 포인터는 그 자체로 끊어진 링크다(v20 → v21 전환에서 15건을
+  grep으로 찾아 고쳤다). **부작용 하나**: 이 검사 때문에 문서에 "끊어진 포인터"를
+  리터럴 예시로 쓸 수 없다 — 이 문단을 처음 쓸 때 예시를 넣었다가 바로 걸렸다.
+  검사를 느슨하게 하는 대신 서술을 바꾸는 쪽을 택했다
+- **가리킨 절이 실제로 있는가**
+- **언급된 ADR 번호에 파일이 있는가** — 범위(`0001~0011`)는 사이 번호까지 전부 확인.
+  `ADR 0006, 2026-07-27` 같은 날짜를 번호로 오인하지 않는다(뒤에 `-숫자`면 건너뜀)
+- **문서의 config 예시가 `config.json`과 같은가** — 새 세션이 그대로 복사해 쓰는 블록이라
+  틀리면 바로 잘못된 설정이 된다. 실제로 `max_subscription_candidates: 1`(실제 2),
+  `judge_model: "gemini"`(실제 codex)로 남아 있었다
+
+**서술의 진실성은 자동화 대상이 아니다** — "측정 대기"가 아직 사실인지 같은 건 기계가 못
+본다. 그건 phase 종료 시 사람이 재검토하는 몫이다. 그리고 **오탐을 만들지 않는 게 최우선**
+이라 placeholder(`<worktree>`, `vN`)와 파싱 안 되는 값은 의도적으로 건너뛴다. config 검사는
+**하나도 못 찾으면 실패**한다(문서 형식이 바뀌어 조용히 무의미해지는 것을 막는다).
+
 `scripts/verify_measure_script.py` — **측정 스크립트를 mock으로 확인(2026-07-29, 비용 0).**
 측정 스크립트는 실제 API를 호출해서 `pytest tests/` 밖에 있고, 그래서 **로직 결함이
 돈을 쓴 뒤에야 드러났다** — 4차 때 `step_input_tokens`가 전부 `None`으로 나온 것,
@@ -288,7 +311,7 @@ dashboard/failure_analysis/live_status → cli). CI 없는 프로젝트라 "린�
 검증**: `schemas.py`에 `from . import orchestrator`(역방향) 임시 추가 →
 테스트가 정확히 잡아내는 것 확인 후 원복.
 
-## 테스트 (416개, 전부 통과)
+## 테스트 (420개, 전부 통과)
 
 새 테스트 파일 추가/파일별 개수 변경 시 이 표도 같이 갱신(2026-07-24 문서
 감사에서 실제(239개)와 다른 옛 숫자(141개)로 오래 방치된 것 발견 —
