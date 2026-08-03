@@ -14,17 +14,30 @@ from pathlib import Path
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
-ROOT = Path(".")
-buckets: dict[str, list[tuple[Path, dict]]] = {"실사용": [], "측정": [], "mock 검증": []}
+# **저장소 루트로 고정한다**(cwd 기준이 아니다). 첫 구현은 `Path(".")`이라 실행 위치에
+# 따라 결과가 달라졌다 — `harness-mvp/`에서 돌리면 `domains/`와 워크트리가 아예 안 보여서
+# "실사용 6건"이 나오고, 루트에서 돌리면 다른 숫자가 나온다. 집계 도구가 실행 위치로
+# 답이 바뀌면 그 숫자는 인용할 수 없다.
+ROOT = Path(__file__).resolve().parents[2]
+buckets: dict[str, list[tuple[Path, dict]]] = {
+    "실사용": [], "실사용(워크트리)": [], "측정": [], "mock 검증": []
+}
 
 for path in ROOT.rglob("fitness_check.json"):
     parts = path.parts
-    if ".claude" in parts and "worktrees" in parts:
-        continue  # 워크트리는 본 저장소 run의 복사본이라 중복 계상된다
+    in_worktree = ".claude" in parts and "worktrees" in parts
+    # **워크트리를 빼지 않는다**(2026-08-03 정정). 첫 구현은 "워크트리는 본 저장소 run의
+    # 복사본이라 중복"이라고 보고 제외했는데 **틀렸다** — run 산출물은 `_workspace/`
+    # (gitignore)에 있어서 워크트리 간에 공유되지 않고, **도메인 작업은 애초에 워크트리에서
+    # 한다.** 그래서 `server-engineering-learning`의 실제 e2e run 6건을 통째로 놓치고
+    # "도메인 run 0건"이라는 틀린 결론을 문서 네 곳에 적었다. 저장소가 이미 그 run을
+    # 기록하고 있었는데(`planner.py`, 체크리스트) 집계를 더 믿은 것이 원인이다.
     if "_verify_mock" in parts:
         bucket = "mock 검증"
     elif "measurements" in parts:
         bucket = "측정"
+    elif in_worktree:
+        bucket = "실사용(워크트리)"
     else:
         bucket = "실사용"
     try:

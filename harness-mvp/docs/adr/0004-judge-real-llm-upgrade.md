@@ -3,6 +3,12 @@
 - 상태: 확정
 - 관련 플랜: `harness-implementation-plan-ko.md` Section 7 Step 6(Judge/Synthesizer),
   ADR 0001(팀 패턴 분기), ADR 0003(Debate/Consensus 보류)
+- **정정: ADR 0010(2026-08-03) — 여기서 blind 익명화의 목적으로 적은 "서로 다른 모델의
+  공평한 비교"라는 전제가 측정으로 부정됐다.** 다모델 조합(claude+codex)은 동일 모델
+  후보(claude+claude) 대비 우위가 없었다(정면 비교 4-2로 동질 쪽, 평균 점수 차 0.005).
+  실제로 값을 내는 건 **같은 모델을 temperature 0.7로 여러 번 굴려 고르는 것**이다.
+  익명화·무작위 순서 장치는 position bias 때문에 여전히 필요하지만, "다모델이라서
+  필요하다"는 근거는 쓰지 말 것.
 
 ## 배경
 

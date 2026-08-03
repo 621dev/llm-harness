@@ -1,4 +1,4 @@
-# harness-mvp — Phase 1~6 완료 + 팀 패턴 4종 (ADR 0001~0011)
+# harness-mvp — Phase 1~6 완료 + 팀 패턴 4종 (ADR 0001~0012)
 
 전체 설계: `../docs/02_구현플랜/harness-implementation-plan-ko.md`.
 
@@ -12,7 +12,8 @@ Phase 3 검증: mock 아님 — 실제 claude/codex CLI(구독) + Gemini REST AP
 도메인 `../domains/cloud-ops/`), ADR 0006/0007(세 번째·네 번째 팀 패턴), ADR 0008(체인 최종 산출물 구성),
 ADR 0009(`hierarchical_delegation`을 opt-in으로 강등 — 네 번 측정해서 우위 미입증),
 ADR 0010(`fan_out_judge` 유지 + 패턴 측정을 두 축으로 — 두 번 재서 두 번 다 우세),
-ADR 0011(후보 병합 폐기 — final.md가 문서 두 개가 되던 결함).
+ADR 0011(후보 병합 폐기 — final.md가 문서 두 개가 되던 결함),
+ADR 0012(도메인을 견적 하나로 축소 — 나머지 4개는 실제 run 0건).
 
 **팀 패턴 4종** — `team_pattern` 값으로 분기하며, 뒤 두 개는 `constraints`의
 `"team_pattern:<이름>"` opt-in으로만 진입한다:
@@ -125,11 +126,7 @@ Windows PowerShell: `$env:PYTHONPATH="src"; python -m harness.cli run --task ...
 | `src/fetchers/base.py` | `Fetcher` ABC(`fetch(**params) -> FetchResult`) — 읽기 전용 외부 데이터 조회, `Provider`와 역할 구분해 별도 top-level 패키지(ADR 0005) |
 | `src/fetchers/aws_price_fetcher.py` | `AwsEc2PriceFetcher` — AWS Price List Bulk API(인증 불필요)로 EC2 온디맨드 요금 조회, 24시간 캐시. 실제 계정 없이 검증 완료 |
 | `src/fetchers/ncp_price_fetcher.py` | `NcpServerPriceFetcher` — NCP Billing API(`getProductPriceList`, HMAC-SHA256 서명)로 서버 상품 시간당 요금 조회. 실제 계정 검증 완료 |
-| `domains/cloud-ops/` | 도메인 폴더 1호(ADR 0005 검증용) — 독립 `config.json`/`examples/`/`_workspace/`, `run_estimate.py`(서버 스펙 JSON을 받아 Fetcher 실측 가격을 프롬프트에 주입 후 fan_out_judge 실행 — 2026-07-14 시나리오별 스크립트 3개를 이 하나로 통합) |
-| `domains/ncp-snapshot-drill/` | 도메인 폴더 2호(2026-07-16) — NCP 스냅샷 생성·복구 훈련 절차서 생성/검토(Fetcher 없음, 일반 지식 기반, 실제 API 자동화 아님). 커스텀 스크립트 없이 독립 `config.json`(역할별 모델 지정)만으로 harness-mvp CLI 그대로 사용, "조사" 키워드로 research→design_review 자동 라우팅(계획만 로컬 검증, 실제 LLM run 미실행) |
-| `domains/centos-eol-migration/` | 도메인 폴더 3호(2026-07-16) — 지원종료 CentOS 7 서버 9대 → Rocky Linux 마이그레이션 계획 생성/검토(ncp-snapshot-drill과 동일 구조). 계획 다듬는 단계, 실제 LLM run 미실행 |
-| `domains/cloud-ops-consulting/` | 도메인 폴더 4호(2026-07-22) — 주제 미확정 클라우드 운영 전반 상담용 "가벼운" 도메인(동일 구조, `scripts/new_domain.py`로 스캐폴딩). 논의 중 특정 주제가 깊어지면 별도 도메인으로 분리 예정. 실제 LLM run 미실행 |
-| `domains/server-engineering-learning/` | 도메인 폴더 5호(2026-07-25) — 초급 엔지니어의 서버 엔지니어링 학습을 돕는 "가벼운" 도메인(Fetcher 없음, `scripts/new_domain.py`로 스캐폴딩). 첫 예시 task는 리눅스 서버 운영 기초(프로세스/네트워크/권한/로그 관리) 리서치 → 학습 자료 검토(research→design_review 체인). 실제 LLM run 미실행 |
+| `domains/cloud-ops/` | **유일한 도메인**(2026-08-03 정리 — 나머지 4개는 실제 run 0건으로 삭제, ADR 0012). 견적 계산 담당 — 독립 `config.json`/`examples/`/`_workspace/`, `run_estimate.py`(서버 스펙 JSON을 받아 Fetcher 실측 가격을 프롬프트에 주입 후 fan_out_judge 실행 — 2026-07-14 시나리오별 스크립트 3개를 이 하나로 통합) |
 
 Planner/Router/Synthesizer/Safety: 규칙 기반, LLM 미호출 — 목적은 채점/합성/
 검사 "품질"이 아니라 파이프라인(파일 기록, 복구 전략, 재현성) 검증. `evals`
