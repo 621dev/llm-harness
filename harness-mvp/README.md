@@ -1,4 +1,4 @@
-# harness-mvp — Phase 1~6 완료 + 팀 패턴 4종 (ADR 0001~0012)
+# harness-mvp — Phase 1~6 완료 + 팀 패턴 4종 (ADR 0001~0013)
 
 전체 설계: `../docs/02_구현플랜/harness-implementation-plan-ko.md`.
 
@@ -13,7 +13,8 @@ Phase 3 검증: mock 아님 — 실제 claude/codex CLI(구독) + Gemini REST AP
 ADR 0009(`hierarchical_delegation`을 opt-in으로 강등 — 네 번 측정해서 우위 미입증),
 ADR 0010(`fan_out_judge` 유지 + 패턴 측정을 두 축으로 — 두 번 재서 두 번 다 우세),
 ADR 0011(후보 병합 폐기 — final.md가 문서 두 개가 되던 결함),
-ADR 0012(도메인을 견적 하나로 축소 — 나머지 4개는 실제 run 0건).
+ADR 0012(도메인을 견적 하나로 축소),
+ADR 0013(체인 최종 산출물을 발행물 하나로 — ADR 0008 개정).
 
 **팀 패턴 4종** — `team_pattern` 값으로 분기하며, 뒤 두 개는 `constraints`의
 `"team_pattern:<이름>"` opt-in으로만 진입한다:
@@ -34,7 +35,7 @@ ADR 0012(도메인을 견적 하나로 축소 — 나머지 4개는 실제 run 0
 cd harness-mvp
 pip install -e .[dev]                                     # pydantic + pytest 설치
 
-python -m pytest tests/ -v                                # 423개, 전부 mock — 실제 CLI/API 미호출
+python -m pytest tests/ -v                                # 425개, 전부 mock — 실제 CLI/API 미호출
 
 PYTHONPATH=src python -m harness.cli run --task examples/task.fan_out.json
 PYTHONPATH=src python -m harness.cli run --task examples/task.fan_out.json --models claude,gemini  # 이 실행만 후보 모델 오버라이드(codex 제외)
@@ -308,7 +309,7 @@ dashboard/failure_analysis/live_status → cli). CI 없는 프로젝트라 "린�
 검증**: `schemas.py`에 `from . import orchestrator`(역방향) 임시 추가 →
 테스트가 정확히 잡아내는 것 확인 후 원복.
 
-## 테스트 (423개, 전부 통과)
+## 테스트 (425개, 전부 통과)
 
 새 테스트 파일 추가/파일별 개수 변경 시 이 표도 같이 갱신(2026-07-24 문서
 감사에서 실제(239개)와 다른 옛 숫자(141개)로 오래 방치된 것 발견 —

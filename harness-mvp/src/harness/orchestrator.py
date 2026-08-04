@@ -473,32 +473,48 @@ def _run_hierarchical_delegation(
 
 
 def _render_chain_final(run_dir: Path, steps: list[DelegationStep]) -> str:
-    """성공한 스텝들의 본문을 엮어 최종 산출물을 만든다.
+    """체인의 **발행물 한 개**를 골라 최종 산출물로 삼는다 (ADR 0013).
 
-    **왜 마지막 스텝만 쓰지 않는가**(2026-07-28 패턴 부가가치 측정에서 발견):
-    예전에는 `steps[-1]`의 출력을 그대로 final.md로 삼았는데, `[research,
-    design_review]`처럼 마지막이 "검토" 역할인 체인에서는 최종 산출물이 사용자가
-    요청한 내용이 아니라 **그것에 대한 리뷰 코멘트**가 됐다. 요청한 내용은
-    중간 산출물(`artifacts/chain/step-1-*.md`)에만 남아 final.md에서는 보이지
-    않았고, 그래서 direct_call과 비교 측정했을 때 체인이 불리하게 나왔다 —
-    품질 문제가 아니라 "다른 물건을 내놓고 있던" 문제였다.
+    **이력**: 원래는 `steps[-1]`이었다. `[research, design_review]`처럼 마지막이 검토
+    역할이면 final.md가 요청물이 아니라 **리뷰 코멘트**가 됐다(2026-07-28 측정에서 발견).
+    ADR 0008이 그걸 "성공한 **모든** 스텝을 `## N. 역할`로 엮기"로 고쳤는데, 그 방식이
+    새 문제를 만들었다 — **final.md가 발행물이 아니라 내부 공정 기록이 됐다.**
 
-    LLM을 한 번 더 불러 합성하지 않고 규칙 기반으로 엮는다: fan_out_judge의
-    synthesizer도 규칙 기반이고, 체인 run마다 호출을 추가하는 건 "필요할 때만
-    만든다" 원칙(ADR 0003/0005)에 어긋난다. 스텝이 하나뿐이면 역할 제목 없이
-    본문만 — 1스텝 체인에까지 구조를 씌우면 소음이다.
+    실측(`server-engineering-learning` run, 424줄): `## 1. research`(초안) +
+    `## 2. design_review`(리뷰 코멘트) + `## 3. content_finalization`(최종본)이 이어져,
+    **같은 문서의 두 판본과 그 사이 리뷰가 한 파일에** 들어갔다. 4차 측정에서 판정자가
+    `'design_review'`를 역할 이름으로 언급한 게 이 구조 때문이다. ADR 0011에서 fan_out의
+    후보 병합을 폐기한 것과 **같은 결함 유형**이다.
+
+    **규칙: 검토 역할이 아닌 마지막 스텝의 본문만 낸다.**
+
+    - `[research, design_review, content_finalization]` → `content_finalization`
+      (리뷰를 반영한 완성본. 리뷰와 초안은 이미 그 안에 녹아 있다)
+    - `[research, design_review]` → `research` (초안이 요청물. ADR 0008이 고치려던 그 경우)
+    - `[design_review, implementation_review]` → `implementation_review`
+      **검토만으로 구성된 체인은 리뷰가 곧 요청물이므로** 마지막 스텝을 그대로 쓴다
+
+    버려지는 게 아니다 — 모든 스텝은 `artifacts/chain/step-N-역할.md`에 그대로 남는다.
+    final.md에서 빼는 것뿐이다(ADR 0008 결정 2번 "내부 메타데이터는 발행물에서 뺀다"의
+    연장선 — 공정 기록도 메타데이터다).
+
+    LLM 합성 스텝은 여전히 추가하지 않는다: ADR 0008이 기각한 근거(호출 추가 = "필요할
+    때만 만든다" 위반)가 유효하고, ADR 0011도 같은 이유로 기각했다.
     """
     successful = [step for step in steps if step.status == "success"]
     if not successful:
         return ""
-    if len(successful) == 1:
-        return subagent_runner.read_step_content(run_dir, successful[0])
+    return subagent_runner.read_step_content(run_dir, _publishable_step(successful))
 
-    sections = [
-        f"## {index}. {step.role}\n\n{subagent_runner.read_step_content(run_dir, step)}"
-        for index, step in enumerate(successful, start=1)
-    ]
-    return "\n\n---\n\n".join(sections)
+
+def _publishable_step(successful: list[DelegationStep]) -> DelegationStep:
+    """발행할 스텝 하나를 고른다 — 검토 역할이 아닌 마지막 것.
+
+    검토 역할만으로 이뤄진 체인(`sequential_review` 기본 구성이 그렇다)에서는 리뷰가
+    곧 요청물이므로 마지막 스텝을 쓴다. 이 폴백이 없으면 그 체인의 final.md가 빈다.
+    """
+    publishable = [s for s in successful if s.role not in planner.REVIEW_DELEGATION_ROLES]
+    return publishable[-1] if publishable else successful[-1]
 
 
 def _run_iterative_refinement(

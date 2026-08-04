@@ -60,23 +60,80 @@ class ChainFinalCompositionTest(unittest.TestCase):
         run_dir = self.tmp_dir / f"run-{task_id}"
         return run_dir, run_store.read_markdown(run_dir, "final.md")
 
-    def test_all_successful_step_outputs_survive_into_final(self) -> None:
-        """회귀 방지 핵심: 요청한 내용(첫 스텝 산출물)이 final.md에서 사라지면 안 된다."""
-        run_dir, final = self.run_chain_task("chain-all-steps")
+    def test_final_is_the_last_non_review_step_only(self) -> None:
+        """final.md는 **발행물 한 개**다 — 검토 역할이 아닌 마지막 스텝 (ADR 0013).
+
+        ADR 0008은 "성공한 모든 스텝을 `## N. 역할`로 엮기"였는데, 그러면 final.md가
+        **같은 문서의 두 판본(초안·최종본) + 그 사이 리뷰**가 된다(실측 424줄).
+        발행물이 아니라 공정 기록이라 ADR 0013으로 개정했다.
+        """
+        run_dir, final = self.run_chain_task("chain-publishable-only")
 
         plan = run_store.read_json(run_dir, "plan.json")
         roles = [step["role"] for step in plan["delegation_chain"]]
-        # 2026-07-27 content_finalization 추가로 research 기본 체인이 3단계가 됨(전제 확인)
-        self.assertEqual(roles, ["research", "design_review", "content_finalization"])
+        self.assertEqual(roles, ["research", "design_review", "content_finalization"])  # 전제
 
+        expected = subagent_runner.read_step_content(
+            run_dir,
+            DelegationStep(role="content_finalization", provider_id="content_finalization-mock",
+                           output_ref="artifacts/chain/step-3-content_finalization.md"),
+        )
+        # `finalize`가 `rstrip()` 후 개행 하나를 붙여 쓴다 — 그 형식까지 맞춰 비교한다.
+        self.assertEqual(final, expected + "\n")
+
+        # 역할 제목(`## N. 역할`)이 발행물에 안 남는다.
+        for role in roles:
+            with self.subTest(role=role):
+                self.assertNotIn(f". {role}", final)
+
+        # **"리뷰 본문이 final에 없다"는 이 mock으로 검증할 수 없다.** `MockProvider`가
+        # 입력 프롬프트를 되풀이하고 체인은 누적 히스토리를 넘기므로,
+        # `content_finalization`의 출력 자체에 리뷰 텍스트가 들어 있다(실제 LLM은 그러지
+        # 않는다 — mock 경로와 실제 경로의 불일치, v21 §6).
+        # 대신 **위의 완전 일치(assertEqual)가 그 성질을 이미 보장한다** — 발행물이 그
+        # 스텝의 본문과 정확히 같으므로 다른 스텝이 덧붙지 않았다.
+
+    def test_all_steps_remain_as_artifacts(self) -> None:
+        """발행물에서 뺀 스텝이 **사라지는 게 아니다** — 스텝 파일은 그대로 남는다.
+
+        ADR 0013이 ADR 0008의 원래 우려("요청물이 안 보인다")를 되살리지 않는다는 확인.
+        """
+        run_dir, _ = self.run_chain_task("chain-artifacts-kept")
+
+        roles = ["research", "design_review", "content_finalization"]
         for index, role in enumerate(roles, start=1):
             with self.subTest(role=role):
-                self.assertIn(f"## {index}. {role}", final)
-                step_body = subagent_runner.read_step_content(
-                    run_dir, DelegationStep(role=role, provider_id=f"{role}-mock",
-                                            output_ref=f"artifacts/chain/step-{index}-{role}.md")
-                )
-                self.assertIn(step_body, final)
+                path = run_dir / "artifacts" / "chain" / f"step-{index}-{role}.md"
+                self.assertTrue(path.is_file(), f"{path.name}이 없다")
+                self.assertIn(role, path.read_text(encoding="utf-8"))
+
+    def test_review_only_chain_publishes_its_last_review(self) -> None:
+        """검토만으로 이뤄진 체인은 **리뷰가 곧 요청물**이다 (ADR 0013 폴백).
+
+        `sequential_review` 기본 구성이 `[design_review, implementation_review]`로 둘 다
+        검토 역할이다. 폴백이 없으면 그 체인의 final.md가 빈다.
+        """
+        steps = [
+            DelegationStep(role="design_review", provider_id="design_review-mock",
+                           output_ref="artifacts/chain/step-1-design_review.md", status="success"),
+            DelegationStep(role="implementation_review", provider_id="implementation_review-mock",
+                           output_ref="artifacts/chain/step-2-implementation_review.md",
+                           status="success"),
+        ]
+        run_dir = run_store.create_run(run_id="run-review-only", root=self.tmp_dir)
+        for step, body in zip(steps, ("설계 리뷰 본문", "구현 리뷰 본문")):
+            run_store.write_markdown(
+                run_dir, step.output_ref,
+                # `- latency_ms:`가 본문 시작 판정 기준이다
+                # (`subagent_runner._STEP_META_LAST_FIELD`) — 없으면 헤더가 안 걷히고
+                # 파일이 통째로 반환된다.
+                f"# Chain Step {step.role} ({step.provider_id})\n\n- status: success\n"
+                f"- latency_ms: 10\n\n{body}\n",
+            )
+
+        composed = orchestrator._render_chain_final(run_dir, steps)
+
+        self.assertEqual(composed, "구현 리뷰 본문")
 
     def test_internal_step_metadata_is_not_published(self) -> None:
         """스텝 파일의 디버깅용 헤더가 발행물에 섞이면 안 된다."""

@@ -83,6 +83,19 @@ KNOWN_DELEGATION_ROLES = frozenset(
     }
 )
 
+# 위 역할 중 **산출물이 "다른 산출물에 대한 평가"인 것들** (2026-08-03, ADR 0013).
+#
+# 체인의 발행물을 고를 때 쓴다 — 검토 역할의 출력은 그 자체로 요청물이 아니라 **요청물을
+# 고치기 위한 입력**이다. `_render_chain_final`이 이 목록으로 "무엇을 final.md로 낼지"를
+# 정한다.
+#
+# **`content_finalization`은 여기 없다** — 이름에 review가 없어서가 아니라, 그 역할이
+# 실제로 하는 일이 "검토 의견을 반영해 **완성본을 쓰는 것**"이기 때문이다. 판단 기준은
+# 이름이 아니라 **산출물의 성격**이다.
+REVIEW_DELEGATION_ROLES = frozenset(
+    {"design_review", "implementation_review", "compliance_review"}
+)
+
 _HIGH_RISK_KEYWORDS = ("배포", "삭제", "프로덕션", "production", "결제", "개인정보", "금융")
 _MEDIUM_RISK_KEYWORDS = ("설계", "아키텍처", "정책", "계약")
 _RISK_OVERRIDE_PREFIX = "risk_level:"
