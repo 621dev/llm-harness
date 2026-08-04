@@ -14,6 +14,13 @@ from .schemas import FitnessCheck, TaskInput, TeamPattern
 # Section 12.1: 단순 사실 확인/한 줄 질문처럼 "비교"나 "역할 분업"의 이득이 없는 작업은
 # 하네스화하지 않는다. 애매하면 기본값 passed=True (과소적용보다 과대적용이 안전).
 _TRIVIAL_PROMPT_MAX_LEN = 20
+
+# 키워드 검사는 **짧은 프롬프트에만** 적용한다(2026-08-04). 이전에는 길이와 무관하게
+# 부분 문자열로 검사해서, 1,948자짜리 아키텍처 설계 프롬프트가 본문 중간의 "누가
+# 승인하며" 한 구절 때문에 게이트를 탈락하고 direct_call로 떨어졌다. "누구야"/"맞아?"/
+# "몇 개"도 긴 문서형 프롬프트 안에 자연스럽게 등장할 수 있어 같은 함정이 있었다.
+# 이 오판은 "애매하면 passed=True" 철학과 반대 방향(과소적용)이라 상한을 둔다.
+_TRIVIAL_KEYWORD_MAX_LEN = 60
 _TRIVIAL_KEYWORDS = (
     "몇 시", "몇 개", "언제야", "누구야", "누가", "정의가 뭐", "뜻이 뭐", "맞아?", "맞나요",
 )
@@ -46,7 +53,12 @@ def check_fitness(task: TaskInput) -> FitnessCheck:
     """하네스화(패턴 분기) 자체가 필요한 작업인지 저비용으로 사전 판정한다 (Section 12.1)."""
     prompt = task.prompt.strip()
 
-    if len(prompt) <= _TRIVIAL_PROMPT_MAX_LEN or any(keyword in prompt for keyword in _TRIVIAL_KEYWORDS):
+    is_trivial = len(prompt) <= _TRIVIAL_PROMPT_MAX_LEN or (
+        len(prompt) <= _TRIVIAL_KEYWORD_MAX_LEN
+        and any(keyword in prompt for keyword in _TRIVIAL_KEYWORDS)
+    )
+
+    if is_trivial:
         return FitnessCheck(
             passed=False,
             reason="단순 사실 확인/짧은 질문으로 판단되어 패턴 분기 없이 direct_call로 처리",

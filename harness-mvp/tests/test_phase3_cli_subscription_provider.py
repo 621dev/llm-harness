@@ -18,6 +18,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from harness.schemas import ProviderConfig  # noqa: E402
+from providers import cli_subscription_provider  # noqa: E402  (타임아웃 상수 직접 확인용)
 from providers.base import ProviderError  # noqa: E402
 from providers.cli_subscription_provider import (  # noqa: E402
     ClaudeAgentProvider,
@@ -104,10 +105,36 @@ class ClaudeCliProviderTest(unittest.TestCase):
 
     @patch("providers.cli_subscription_provider.subprocess.run")
     def test_timeout_raises_provider_error(self, mock_run) -> None:
-        mock_run.side_effect = subprocess.TimeoutExpired(cmd="claude", timeout=120.0)
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="claude", timeout=420.0)
 
         with self.assertRaises(ProviderError):
             self.provider.generate("1+1은?")
+
+    def test_default_timeout_covers_measured_subscription_latency(self) -> None:
+        """기본 타임아웃이 **실측된 구독 호출 지연**을 덮는가 (2026-08-03).
+
+        120초였을 때 정상 작업이 타임아웃으로 죽었다. 8차 측정(k=6, 구독 생성)의 시도당
+        지연이 268~432초였고 한 시도가 구독 2회 + gemini judge 1회이므로 **구독 1회당
+        200초를 넘는다.** 420초는 그 측정 12시도가 한 번도 타임아웃 없이 통과한 값이다.
+
+        이 테스트가 지키는 것은 "420"이라는 숫자가 아니라 **실측 하한(구독 1회 200초)을
+        덮는다**는 성질이다. 나중에 CLI가 빨라져 값을 낮출 때도 근거 없이는 못 내린다.
+        """
+        measured_single_call_floor_sec = 200.0
+
+        self.assertGreater(
+            cli_subscription_provider.DEFAULT_TIMEOUT_SEC,
+            measured_single_call_floor_sec,
+            "구독 CLI 단발 호출은 실측 200초를 넘는다(8차 측정). 기본 타임아웃이 그보다 "
+            "낮으면 정상 작업이 실패로 바뀌고 구독 호출도 버려진다 — 실패한 시도도 "
+            "한도를 소모한다.",
+        )
+        # 에이전트 모드보다는 짧아야 한다 — 도구를 여러 턴 호출하는 쪽이 더 오래 걸린다.
+        self.assertLess(
+            cli_subscription_provider.DEFAULT_TIMEOUT_SEC,
+            cli_subscription_provider.DEFAULT_AGENT_TIMEOUT_SEC,
+            "단발 완성이 에이전트 모드보다 긴 타임아웃을 갖는 건 앞뒤가 안 맞는다",
+        )
 
     @patch("providers.cli_subscription_provider.subprocess.run")
     def test_prompt_passed_via_stdin_not_as_cli_argument(self, mock_run) -> None:

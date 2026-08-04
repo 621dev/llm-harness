@@ -30,6 +30,31 @@ class FitnessGateTest(unittest.TestCase):
         )
         self.assertTrue(result.passed)
 
+    def test_medium_length_trivial_keyword_still_fails_gate(self) -> None:
+        # 길이 상한(60자) 안이면 키워드 검사는 그대로 동작해야 한다.
+        result = router.check_fitness(make_task("이 서비스 아키텍처 승인은 누가 하나요?"))
+        self.assertFalse(result.passed)
+
+    def test_long_prompt_with_trivial_keyword_passes_gate(self) -> None:
+        """회귀 방지(2026-08-04): 긴 문서형 프롬프트 + trivial 키워드 1개 -> passed=True.
+
+        이전에는 키워드를 길이와 무관하게 부분 문자열로 검사해서, 본문 중간의 "누가
+        승인하며" 한 구절 때문에 1,900자짜리 설계 프롬프트가 direct_call로 떨어졌다.
+        게이트 철학은 "애매하면 passed=True"(과소적용보다 과대적용이 안전)이다.
+        """
+        prompt = (
+            "사내 인프라를 온프레미스에서 클라우드로 이전하려고 한다. 대상은 API 서버 12대와 "
+            "MySQL 3대이며, 무중단 전환이 요구사항이다. 네트워크 분리 정책과 백업 주기, "
+            "장애 시 롤백 절차를 포함한 아키텍처 설계안을 작성해줘. 변경을 누가 승인하며 "
+            "어느 단계에서 검증하는지도 명시해줘. 비용 추정과 대안 비교도 함께 담아줘."
+        )
+        self.assertGreater(len(prompt), router._TRIVIAL_KEYWORD_MAX_LEN)
+        self.assertTrue(any(k in prompt for k in router._TRIVIAL_KEYWORDS))
+
+        result = router.check_fitness(make_task(prompt))
+
+        self.assertTrue(result.passed)
+
     def test_ambiguous_length_defaults_to_passed(self) -> None:
         # 애매한 경우 과소적용보다 과대적용이 안전하다는 원칙(Section 12.1) 확인:
         # 트리비얼 키워드가 없고 길이 기준을 넘으면 기본값은 통과.

@@ -197,7 +197,7 @@ def _extract_errors(run_dir: Path) -> dict[str, Any]:
         if not isinstance(entry, dict):
             continue
         # **`kind`(구조적 필드)로 분류한다.** 메시지 문구를 매칭하면 문구를 다듬는
-        # 순간 조용히 오분류되고, 그건 이 프로젝트에서 세 번 데인 방식이다(v19 §6).
+        # 순간 조용히 오분류되고, 그건 이 프로젝트에서 세 번 데인 방식이다(v21 §6).
         # 예산 중단을 provider 실패로 세면 "codex가 자주 실패한다"는 잘못된 학습이
         # 생긴다 — 예산 때문에 호출조차 안 된 것까지 실패로 잡히기 때문이다.
         kind = entry.get("kind")

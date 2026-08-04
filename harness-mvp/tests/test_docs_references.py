@@ -32,12 +32,24 @@ _ADR_DIR = _REPO_ROOT / "harness-mvp" / "docs" / "adr"
 
 
 def _markdown_files() -> list[Path]:
-    """검사 대상 문서. 워크트리 사본은 본 저장소 문서의 복사본이라 제외한다."""
+    """검사 대상 파일. 워크트리 사본은 본 저장소 파일의 복사본이라 제외한다.
+
+    **`.py`도 본다**(2026-08-03 확장). 처음엔 `.md`만 봤는데 **소스 주석의 포인터를
+    통째로 놓쳤다** — `learning.py`와 `base.py`의 주석이 각각 두 버전 전, 세 버전 전
+    인수인계 문서를 가리키고 있었다. 코드 주석은 "왜 이렇게 했나"를 설명하며 인수인계
+    문서를 가리키는 경우가 많고, 그 링크가 끊기면 근거를 찾을 수 없다. 함수 이름은
+    이력 때문에 `_markdown_files`로 유지한다.
+    """
     files: list[Path] = []
     for base in (_REPO_ROOT / "docs", _REPO_ROOT / "harness-mvp"):
-        files.extend(
-            p for p in base.rglob("*.md") if ".claude" not in p.parts and "_workspace" not in p.parts
-        )
+        for pattern in ("*.md", "*.py"):
+            files.extend(
+                p
+                for p in base.rglob(pattern)
+                if ".claude" not in p.parts
+                and "_workspace" not in p.parts
+                and "__pycache__" not in p.parts
+            )
     files.append(_REPO_ROOT / "CLAUDE.md")
     return [p for p in files if p.is_file()]
 
@@ -60,11 +72,14 @@ class DocsAreReachableTest(unittest.TestCase):
 class HandoffPointerTest(DocsAreReachableTest):
     """`vN §M` 포인터가 **현재 최신 인수인계 문서**를 가리키는가.
 
-    옛 버전은 최신에 흡수되고 삭제되는 게 규칙이라(작업 규칙 "문서"),
-    `v20 §5`처럼 사라진 버전을 가리키는 포인터는 그 자체로 끊어진 링크다.
+    옛 버전은 최신에 흡수되고 삭제되는 게 규칙이라(작업 규칙 "문서"), 이전 버전 번호가
+    남은 포인터는 그 자체로 끊어진 링크다.
 
-    `당시 v18 → 현재 v21 §5`처럼 **버전만 언급하고 §가 안 붙은 이력 서술은 대상이
-    아니다** — 그건 "그때 그 버전이 있었다"는 사실 기록이고 포인터가 아니다.
+    **버전만 언급하고 `§`가 안 붙은 이력 서술은 대상이 아니다**("당시 v18 →" 같은 것) —
+    그건 "그때 그 버전이 있었다"는 사실 기록이고 포인터가 아니다.
+
+    **이 파일에 옛 버전 포인터를 리터럴로 쓸 수 없다** — `.py`까지 검사하게 된 순간
+    이 docstring의 예시가 스스로 걸렸다. 예시가 필요하면 버전 숫자를 빼고 서술할 것.
     """
 
     _POINTER = re.compile(r"\bv(\d+)\s*§\s*(\d+)")

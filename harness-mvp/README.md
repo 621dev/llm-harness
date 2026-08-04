@@ -34,7 +34,7 @@ ADR 0012(도메인을 견적 하나로 축소 — 나머지 4개는 실제 run 0
 cd harness-mvp
 pip install -e .[dev]                                     # pydantic + pytest 설치
 
-python -m pytest tests/ -v                                # 420개, 전부 mock — 실제 CLI/API 미호출
+python -m pytest tests/ -v                                # 423개, 전부 mock — 실제 CLI/API 미호출
 
 PYTHONPATH=src python -m harness.cli run --task examples/task.fan_out.json
 PYTHONPATH=src python -m harness.cli run --task examples/task.fan_out.json --models claude,gemini  # 이 실행만 후보 모델 오버라이드(codex 제외)
@@ -308,7 +308,7 @@ dashboard/failure_analysis/live_status → cli). CI 없는 프로젝트라 "린�
 검증**: `schemas.py`에 `from . import orchestrator`(역방향) 임시 추가 →
 테스트가 정확히 잡아내는 것 확인 후 원복.
 
-## 테스트 (420개, 전부 통과)
+## 테스트 (423개, 전부 통과)
 
 새 테스트 파일 추가/파일별 개수 변경 시 이 표도 같이 갱신(2026-07-24 문서
 감사에서 실제(239개)와 다른 옛 숫자(141개)로 오래 방치된 것 발견 —
@@ -322,7 +322,7 @@ dashboard/failure_analysis/live_status → cli). CI 없는 프로젝트라 "린�
 | `test_step2_model_runner.py` | 11 | fan_out_judge 후보 생성, 재시도/복구, auth_mode별 cost_usd, **재시도 분류**(2026-07-29 — 한도 초과/인증 실패는 재시도 안 함, 그 외는 기존대로, 시도별 오류를 전부 보존) |
 | `test_step3_subagent_runner.py` | 9 | 체인 실행, 컨텍스트 격리, 재시도/복구, 체인 중단, 역할별 지시문 스코핑(첫 스텝/이어받는 스텝 문구 구분, input_ref는 원본 내용 유지), 3번째 스텝이 원본 요청+모든 이전 스텝 결과를 누적해서 받는지(content_finalization 회귀 방지) |
 | `test_step4_planner.py` | 11 | task_type/team_pattern/risk_level/rubric 산출 규칙, `team_pattern:` override(정상/알 수 없는 값 무시), agentic_task의 risk_level=high 강제 및 명시적 override 우선 |
-| `test_step5_router.py` | 9 | 적합성 게이트, team_pattern 사전 분류, direct_call |
+| `test_step5_router.py` | 11 | 적합성 게이트, team_pattern 사전 분류, direct_call |
 | `test_step6_judge_synthesizer.py` | 15 | judge_provider 호출/응답 파싱, 레이블↔model_id 매핑, JudgeError 2종(호출/JSON 파싱 실패), latency/cost 기록, winner/전략 결정, 합성, `check_pass()` 6종(pass/fail 파싱, rubric·콘텐츠 프롬프트 포함, JSON 아님/passed 비bool/호출 실패 시 JudgeError) |
 | `test_step7_safety.py` | 5 | 비밀정보/인젝션/고위험 키워드 탐지 |
 | `test_step9_integration.py` | 13 | 두 패턴 전체 실행, 재현성, 적합성 게이트, 승인 체크포인트, partial 승격 경로 Safety 회귀, 구독 provider 한도 보호 2종, resume 시 run_meta pid 갱신 |
