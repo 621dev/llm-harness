@@ -458,6 +458,76 @@ class SyncWorktreeWithMainTest(unittest.TestCase):
 
         self.assertEqual([r["status"] for r in results], ["missing", "merged"])
 
+    @patch("harness.cli._current_branch")
+    @patch("harness.cli.sync_worktree_with_main")
+    def test_open_pr_branch_is_not_merged(self, mock_sync: MagicMock, mock_branch: MagicMock) -> None:
+        """OPEN PR이 걸린 브랜치에는 main을 병합하지 않는다 (2026-08-05).
+
+        병합하면 그 PR에 merge 커밋이 쌓이고, **그 브랜치는 다른 세션의 작업**이다.
+        동기화 절차 문서에는 "merge를 먼저, 동기화를 나중에"라는 사람 대상 지시만 있었고
+        도구가 막지 않았다 — 실제로 PR #111 브랜치에 동기화가 만든 merge 커밋이 들어갔다
+        (PR이 열리기 전이라 사고는 아니었지만 순서가 반대였으면 오염됐다).
+        """
+        mock_branch.side_effect = ["claude/open-pr-work", "claude/other"]
+        mock_sync.return_value = {
+            "path": "/repo/other", "branch": "claude/other", "status": "merged", "output": ""
+        }
+
+        results = cli.sync_all_worktrees(
+            [Path("/repo/pr"), Path("/repo/other")],
+            skip_branches=frozenset({"claude/open-pr-work"}),
+        )
+
+        self.assertEqual([r["status"] for r in results], ["skipped_open_pr", "merged"])
+        # 건너뛴 것도 결과에 남는다 — 조용히 빠지면 "동기화됐다"고 오해한다.
+        self.assertEqual(results[0]["branch"], "claude/open-pr-work")
+        # 그 worktree에는 merge를 시도조차 하지 않는다.
+        mock_sync.assert_called_once_with(Path("/repo/other"))
+
+    @patch("harness.cli._current_branch")
+    @patch("harness.cli.sync_worktree_with_main")
+    def test_empty_skip_list_does_not_query_branches(
+        self, mock_sync: MagicMock, mock_branch: MagicMock
+    ) -> None:
+        """건너뛸 대상이 없으면 브랜치를 조회하지 않는다.
+
+        worktree마다 `git rev-parse`를 더 부르는 건 낭비이고, **디렉터리가 사라진
+        worktree에서는 그 호출이 예외를 던져 `missing` 처리 경로를 앞지른다** — 위
+        `test_missing_worktree_directory_does_not_abort_the_run`이 지키는 동작을 깨뜨린다.
+        """
+        mock_sync.return_value = {
+            "path": "/repo/x", "branch": "claude/x", "status": "merged", "output": ""
+        }
+
+        cli.sync_all_worktrees([Path("/repo/x")])
+
+        mock_branch.assert_not_called()
+
+    @patch("harness.cli.subprocess.run")
+    def test_open_pr_branches_returns_empty_when_gh_is_unavailable(self, mock_run: MagicMock) -> None:
+        """`gh`가 없거나 실패하면 **빈 집합**을 돌려준다 — 예전과 같이 전부 병합한다.
+
+        여기서 전부 건너뛰는 쪽(안전해 보이는 선택)을 택하지 않은 이유: `gh` 미설치 환경에서
+        동기화가 통째로 무력해지고, 그건 **병행 세션이 조용히 낡은 엔진 코드로 도는 상태**를
+        만든다. 그 대가를 2026-08-04에 이미 치렀다(타임아웃 120초로 실패, 구독 4회 소모).
+        """
+        for failure in (
+            subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="gh: not found"),
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="not json", stderr=""),
+        ):
+            with self.subTest(stdout=failure.stdout[:12]):
+                mock_run.return_value = failure
+                self.assertEqual(cli.open_pr_branches(), frozenset())
+
+    @patch("harness.cli.subprocess.run")
+    def test_open_pr_branches_parses_head_ref_names(self, mock_run: MagicMock) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout='[{"headRefName":"claude/a"},{"headRefName":"claude/b"}]', stderr="",
+        )
+
+        self.assertEqual(cli.open_pr_branches(), frozenset({"claude/a", "claude/b"}))
+
     @patch("harness.cli._git")
     def test_conflict_detected_even_when_git_reports_via_stderr(self, mock_git: MagicMock) -> None:
         """회귀 테스트(2026-07-28 실측): squash merge된 브랜치에 main을 다시 병합해

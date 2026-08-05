@@ -547,8 +547,52 @@ def sync_worktree_with_main(path: Path) -> dict[str, str]:
     return {"path": str(path), "branch": branch, "status": status, "output": output}
 
 
-def sync_all_worktrees(worktrees: Sequence[Path]) -> list[dict[str, str]]:
-    return [sync_worktree_with_main(wt) for wt in worktrees]
+def open_pr_branches() -> frozenset[str]:
+    """OPEN PR이 걸린 브랜치 이름들. `gh`가 없거나 실패하면 **빈 집합**을 돌려준다.
+
+    **왜 필요한가**(2026-08-05): OPEN PR의 브랜치에 main을 병합하면 그 PR에 merge 커밋이
+    쌓이고, 그 브랜치는 **다른 세션이 소유한 작업**이다. 동기화 절차 문서에는 "merge를
+    먼저, 동기화를 나중에"라고 사람에게 지시하는 문장만 있었고 **도구가 막지 않았다** —
+    실제로 PR #111 브랜치에 내 동기화가 만든 merge 커밋이 들어갔다(PR이 열리기 전이라
+    사고는 아니었지만, 순서가 반대였으면 그 세션의 PR이 오염됐다).
+
+    **`gh`를 필수 의존으로 만들지 않는다.** 없으면 빈 집합 → 예전과 똑같이 전부 병합한다.
+    "보호 장치가 없으면 안전한 쪽으로"가 아니라 **"보호 장치가 없으면 기존 동작"**을 택한
+    이유: 여기서 전부 건너뛰면 `gh` 미설치 환경에서 동기화가 통째로 무력해지고, 그건
+    조용히 낡은 코드로 도는 상태를 만든다(그 대가를 2026-08-04에 이미 치렀다).
+    """
+    result = subprocess.run(
+        ["gh", "pr", "list", "--state", "open", "--json", "headRefName"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=_REPO_ROOT,
+    )
+    if result.returncode != 0:
+        return frozenset()
+    try:
+        return frozenset(item["headRefName"] for item in json.loads(result.stdout or "[]"))
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return frozenset()
+
+
+def sync_all_worktrees(
+    worktrees: Sequence[Path], *, skip_branches: frozenset[str] = frozenset()
+) -> list[dict[str, str]]:
+    """각 worktree에 origin/main을 병합한다. `skip_branches`에 든 브랜치는 건너뛴다.
+
+    건너뛴 것도 결과 목록에 남긴다 — 조용히 빠지면 "동기화됐다"고 오해한다.
+    """
+    results: list[dict[str, str]] = []
+    for worktree in worktrees:
+        # `skip_branches`가 비면 브랜치를 아예 조회하지 않는다 — 건너뛸 대상이 없는데
+        # worktree마다 `git rev-parse`를 더 부르는 건 낭비이고, 디렉터리가 사라진
+        # worktree에서는 그 호출이 예외를 던져 "missing" 처리 경로를 앞질러 버린다.
+        branch = _current_branch(worktree) if skip_branches else ""
+        if branch and branch in skip_branches:
+            results.append(
+                {"path": str(worktree), "branch": branch, "status": "skipped_open_pr", "output": ""}
+            )
+            continue
+        results.append(sync_worktree_with_main(worktree))
+    return results
 
 
 _SYNC_STATUS_LABELS = {
@@ -557,6 +601,7 @@ _SYNC_STATUS_LABELS = {
     "conflict": "충돌 — 수동 해결 필요",
     "error": "오류",
     "missing": "디렉터리 없음 — git worktree prune 필요",
+    "skipped_open_pr": "건너뜀 — OPEN PR 브랜치(그 세션 소유)",
 }
 
 
@@ -573,8 +618,15 @@ def cmd_worktree_sync(args: argparse.Namespace) -> int:
         print(f"[fatal] git fetch origin main 실패:\n{fetch.stderr}")
         return 1
 
+    # OPEN PR이 걸린 브랜치는 병합하지 않는다 — 그 PR에 merge 커밋이 쌓이고, 그 브랜치는
+    # 다른 세션의 작업이다(`open_pr_branches` 참고). `gh`가 없으면 빈 집합이라 예전과 같이
+    # 전부 병합한다.
+    skip = open_pr_branches()
+    if skip:
+        print(f"OPEN PR 브랜치 {len(skip)}개는 병합하지 않는다: {', '.join(sorted(skip))}\n")
+
     had_problem = False
-    for result in sync_all_worktrees(worktrees):
+    for result in sync_all_worktrees(worktrees, skip_branches=skip):
         label = _SYNC_STATUS_LABELS.get(result["status"], result["status"])
         print(f"{result['path']}  [{result['branch']}]  {label}")
         # missing도 사람이 조치해야 하는 상태다(등록만 남은 worktree → prune 필요).
