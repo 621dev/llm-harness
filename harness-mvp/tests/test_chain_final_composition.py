@@ -89,7 +89,7 @@ class ChainFinalCompositionTest(unittest.TestCase):
         # **"리뷰 본문이 final에 없다"는 이 mock으로 검증할 수 없다.** `MockProvider`가
         # 입력 프롬프트를 되풀이하고 체인은 누적 히스토리를 넘기므로,
         # `content_finalization`의 출력 자체에 리뷰 텍스트가 들어 있다(실제 LLM은 그러지
-        # 않는다 — mock 경로와 실제 경로의 불일치, v21 §6).
+        # 않는다 — mock 경로와 실제 경로의 불일치, v22 §6).
         # 대신 **위의 완전 일치(assertEqual)가 그 성질을 이미 보장한다** — 발행물이 그
         # 스텝의 본문과 정확히 같으므로 다른 스텝이 덧붙지 않았다.
 

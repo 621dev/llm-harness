@@ -57,7 +57,7 @@ class ProviderError(RuntimeError):
 
         표시 근거는 반드시 **구조적 신호**(HTTP 상태 코드, 환경변수 존재 여부)여야
         한다. 에러 메시지 문구 매칭으로 판정하는 건 이 프로젝트에서 이미 세 번
-        데인 방식이다(v21 §6).
+        데인 방식이다(v22 §6).
         """
         return not (self.is_quota_error or self.is_auth_error)
 
