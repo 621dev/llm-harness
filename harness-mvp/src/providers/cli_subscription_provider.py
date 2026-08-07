@@ -242,6 +242,18 @@ class ClaudeCliProvider(CliSubscriptionProvider):
         # 걸었지만 `-p` 모드에서 닫혀 있고, 근거는 모델 자기보고가 아니라 API가 세는
         # `usage.server_tool_use.web_search_requests == 0`이다. 그래서 rubric의
         # "출처 신뢰성"이 어떤 백엔드로도 달성 불가라는 결론이 나왔다(planner.py 참고).
+        #
+        # **파일 쓰기도 닫혀 있다** (2026-08-06 실측, `scripts/verify_candidate_boundary.py`).
+        # 안쪽(`probe_inside.txt`)·바깥(`../probe_outside.txt`) 둘 다 지시했는데 **파일이
+        # 하나도 생기지 않았다.** 이 경로는 `--permission-mode`도 `--disallowedTools`도
+        # 안 걸므로 ADR 0007의 "cwd는 보안 경계가 아니다"에 비추어 확인이 필요했다.
+        #
+        # 확인 계기가 중요하다: 2026-08-04 인프라 파이프라인 run에서 claude 후보가
+        # **"파일로도 저장되어 있습니다: `scratchpad/infra-plan.md`"**라고 두 번 보고했다.
+        # 프로브 결과 그 보고는 **거짓**이다 — 쓰지 못했는데 썼다고 말했다. 같은 후보가
+        # 계획서 앞에 붙이던 메타 문장("아티팩트 게시가 승인되지 않아…")도 같은 성질이고,
+        # judge가 그걸 약점으로 잡아 감점했다. **모델 자기보고를 부수 효과의 증거로 쓰지
+        # 말 것** — 위 웹 검색 판정에 굳이 API 카운터를 쓴 이유와 같다.
         with tempfile.TemporaryDirectory() as tmp_dir:
             result = subprocess.run(
                 [self._resolve_executable(), "--print", "--output-format", "json", "--input-format", "text"],

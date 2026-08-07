@@ -175,6 +175,18 @@ ADR 0007). 경계를 실제로 강제하는 건 우리 코드가 아니라 claud
 **claude CLI를 업그레이드하면 이걸 돌릴 것**:
 `PYTHONPATH=src python scripts/verify_agent_boundary.py`
 
+`scripts/verify_candidate_boundary.py` — **fan_out 후보 경로의 파일 쓰기 확인**
+(2026-08-06). 위 스크립트가 `ClaudeAgentProvider`만 보는 반면 이건
+`ClaudeCliProvider.generate()`를 본다 — 그 경로는 `--print`만 쓰고
+`--permission-mode`도 `--disallowedTools`도 걸지 않아 ADR 0007의 "cwd는 보안
+경계가 아니다"에 비추어 미확인 상태였다. `generate()`가 자기 임시 디렉터리를
+만들고 지우므로, 모듈이 참조하는 `tempfile`을 지우지 않는 것으로 바꿔 끼워
+안쪽·바깥 쓰기를 둘 다 관찰한다(provider 코드는 무변경). 실제 CLI 호출이라
+`pytest tests/` 밖, 구독 1회.
+**2026-08-06 결과: 파일 0개 — Write는 실효적으로 닫혀 있다.** 확인 계기는 claude
+후보가 "파일로도 저장되어 있습니다"라고 보고한 것인데, **그 보고가 거짓이었다.**
+`PYTHONPATH=src python scripts/verify_candidate_boundary.py`
+
 `scripts/measure_pattern_value.py` — **패턴 부가가치 측정(2026-07-27, 미완).**
 "체인(hierarchical_delegation)의 검토 스텝이 단일 호출보다 실제로 품질을
 올리는가"를 한 번도 측정한 적 없다는 갭을 메우려고 만들었다. 같은 프롬프트를
