@@ -35,7 +35,7 @@ ADR 0013(체인 최종 산출물을 발행물 하나로 — ADR 0008 개정).
 cd harness-mvp
 pip install -e .[dev]                                     # pydantic + pytest 설치
 
-python -m pytest tests/ -v                                # 429개, 전부 mock — 실제 CLI/API 미호출
+python -m pytest tests/ -v                                # 431개, 전부 mock — 실제 CLI/API 미호출
 
 PYTHONPATH=src python -m harness.cli run --task examples/task.fan_out.json
 PYTHONPATH=src python -m harness.cli run --task examples/task.fan_out.json --models claude,gemini  # 이 실행만 후보 모델 오버라이드(codex 제외)
@@ -122,12 +122,13 @@ Windows PowerShell: `$env:PYTHONPATH="src"; python -m harness.cli run --task ...
 | `src/evals/graders.py` | deterministic grader — run_status/final.md 존재/필수·금지 문구 채점 |
 | `src/evals/runner.py` | `run_case_k_times(case, providers_factory, k)` — 동일 케이스 k회 실행, pass_rate(pass@1 근사)/pass_at_k/pass_pow_k, cost·latency per success 계산. **라이브러리 전용 — CLI 진입점이 없다**(import하는 곳은 자기 테스트뿐). 쓰려면 호출 코드를 직접 써야 한다. 2026-07-28 노이즈 감사에서 확인하고 그대로 두기로 결정 — 동작하는 Phase 2 산출물이고 유지 비용도 없어서, 실제로 pass@k를 돌릴 필요가 생기면 그때 `cli.py` 명령을 붙이면 된다("필요할 때만" 원칙). **`scripts/measure_pattern_value.py`와는 답하는 질문이 다르다** — 이쪽은 "같은 케이스가 얼마나 안정적인가"(1조건·규칙 채점), 저쪽은 "두 조건 중 뭐가 나은가"(2조건·LLM rubric 판정) |
 | `src/providers/cli_subscription_provider.py` | `ClaudeCliProvider`/`CodexCliProvider` — claude/codex CLI subprocess 호출, 구독 세션(실제 CLI 검증 완료). 프롬프트는 커맨드라인 인자 아닌 stdin(`input=`) 전달(Windows `.CMD` 긴 인자 손상 버그 수정 — claude는 2026-07-13 ADR 0005 작업 중, codex는 같은 날 별도 환경에서 재현/수정). **`ClaudeAgentProvider`**(ADR 0007) — 같은 claude 바이너리를 에이전트 모드로 여는 서브클래스: `--output-format stream-json`으로 턴별 도구 호출을 관측하고, 안전 경계를 CLI 인자로 강제한다. **경계는 세 인자가 세트**(`--permission-mode dontAsk` + 경로 스코프 allow `Read(./**)` + `--disallowedTools "Bash,Glob,..."`) — 2026-07-27 첫 e2e에서 `--allowedTools`만으로는 전혀 안 막히고 에이전트가 실제 저장소를 탐색한 걸 확인하고 수정했다(ADR 0007 "경계가 뚫린 것을 발견" 절). 차단된 시도는 `permission_denials`→`blocked_tool_uses`로 기록. 턴 상한 도달은 예외가 아니라 `stop_reason="max_turns"` |
-| `src/providers/api_provider.py` | `GeminiApiProvider` — Gemini REST(`generateContent`) API 키 직접 호출, `x-goog-api-key` 헤더(실제 API 검증 완료). HTTP 429는 `ProviderError(is_quota_error=True)`로 구분해서 던짐(2026-07-27, `QuotaFallbackProvider`가 이 플래그로만 대체 provider 전환 여부를 판단) |
+| `src/providers/api_provider.py` | `GeminiApiProvider` — Gemini REST(`generateContent`) API 키 직접 호출, `x-goog-api-key` 헤더(실제 API 검증 완료). HTTP 431는 `ProviderError(is_quota_error=True)`로 구분해서 던짐(2026-07-27, `QuotaFallbackProvider`가 이 플래그로만 대체 provider 전환 여부를 판단) |
 | `src/providers/fallback_provider.py` | `QuotaFallbackProvider`(2026-07-27) — 1차 provider가 quota 오류로 실패하면 2차 provider로 즉시 전환(재시도 없이). "실패를 조용히 감추지 않는다"는 하네스 원칙의 유일한 의도적 예외 — 대상을 quota로만 좁혀서 진짜 버그(응답 형식 오류 등)는 그대로 전파되게 함. `cli.py`의 `_wrap_with_quota_fallback()`이 `config.json`의 `delegation_role_fallback_models`를 보고 역할별로 감쌀지 결정 폴백이 일어나면 `auth_mode`가 **실제로 답한 쪽**을 따라간다 — 그러지 않으면 구독 2차가 답했는데도 `subscription_calls`에 안 잡힌다(2026-07-28 실측 후 수정). |
 | `src/fetchers/base.py` | `Fetcher` ABC(`fetch(**params) -> FetchResult`) — 읽기 전용 외부 데이터 조회, `Provider`와 역할 구분해 별도 top-level 패키지(ADR 0005) |
 | `src/fetchers/aws_price_fetcher.py` | `AwsEc2PriceFetcher` — AWS Price List Bulk API(인증 불필요)로 EC2 온디맨드 요금 조회, 24시간 캐시. 실제 계정 없이 검증 완료 |
 | `src/fetchers/ncp_price_fetcher.py` | `NcpServerPriceFetcher` — NCP Billing API(`getProductPriceList`, HMAC-SHA256 서명)로 서버 상품 시간당 요금 조회. 실제 계정 검증 완료 |
-| `domains/cloud-ops/` | **유일한 도메인**(2026-08-03 정리 — 나머지 4개는 실제 run 0건으로 삭제, ADR 0012). 견적 계산 담당 — 독립 `config.json`/`examples/`/`_workspace/`, `run_estimate.py`(서버 스펙 JSON을 받아 Fetcher 실측 가격을 프롬프트에 주입 후 fan_out_judge 실행 — 2026-07-14 시나리오별 스크립트 3개를 이 하나로 통합) |
+| `domains/cloud-ops/` | **견적 계산 도메인**(2026-08-03에 5개 → 1개로 정리, ADR 0012). 독립 `config.json`/`examples/`/`_workspace/`, `run_estimate.py`(서버 스펙 JSON을 받아 Fetcher 실측 가격을 프롬프트에 주입 후 fan_out_judge 실행 — 2026-07-14 시나리오별 스크립트 3개를 이 하나로 통합). 2026-08-04에 인프라 통합 구축 파이프라인 4건이 실사용됐고 산출물은 `references/infra-integration-outputs/`. `verify_ncp_backup_api.py`는 서버 이미지/스냅샷 자동화 전 **읽기 전용** API 검증(쓰기 액션 호출 차단) |
+| `domains/backup-recovery-drill/` | **백업 복구 훈련 도메인**(2026-08-10 신설). 훈련이 예정돼 있어 ADR 0012의 조건("실제로 돌릴 task가 있는지 먼저 확인")을 충족한다. 삭제된 `ncp-snapshot-drill`의 절차서를 보관본에서 `_workspace/`로 승계했다. 첫 task는 훈련 계획서(`research` → `fan_out_judge` 자동 라우팅) |
 
 Planner/Router/Synthesizer/Safety: 규칙 기반, LLM 미호출 — 목적은 채점/합성/
 검사 "품질"이 아니라 파이프라인(파일 기록, 복구 전략, 재현성) 검증. `evals`
@@ -321,7 +322,7 @@ dashboard/failure_analysis/live_status → cli). CI 없는 프로젝트라 "린�
 검증**: `schemas.py`에 `from . import orchestrator`(역방향) 임시 추가 →
 테스트가 정확히 잡아내는 것 확인 후 원복.
 
-## 테스트 (429개, 전부 통과)
+## 테스트 (431개, 전부 통과)
 
 새 테스트 파일 추가/파일별 개수 변경 시 이 표도 같이 갱신(2026-07-24 문서
 감사에서 실제(239개)와 다른 옛 숫자(141개)로 오래 방치된 것 발견 —
@@ -343,7 +344,7 @@ dashboard/failure_analysis/live_status → cli). CI 없는 프로젝트라 "린�
 | `test_agentic_task.py` | 19 | 자율 에이전트를 감싸는 하네스 검증(ADR 0007) — 승인 전 에이전트 미실행(워크스페이스조차 안 생김)/반려 시 파일 없음/격리 워크스페이스에만 생성/`agent_turns.json` 행동 기록/산출물은 파일 시스템 스캔으로 판정/**생성 파일 비밀정보 → safety review + final.md 차단**(회귀 방지 핵심)/정상 파일 오탐 없음/max_turns partial 승격/에이전트 오류·provider 실패 처리/턴 상한 전달/차단된 도구 사용이 run을 실패시키지 않되 기록은 남는지/워크스페이스 경로 정규화(8.3 단축 경로면 정상 쓰기까지 과차단되는 회귀)/에이전트 provider가 후보 목록에서 제외/워크스페이스 스캔 유틸 4종 |
 | `test_phase2_eval_harness.py` | 10 | grader 채점 규칙 5종, pass@k 러너(전부 성공/혼합/성공만 평균/k<1 예외/hierarchical_delegation) |
 | `test_phase3_cli_subscription_provider.py` | 30 | claude/codex CLI 응답 파싱, 에러(비정상 종료/JSON 파싱 실패/CLI 미설치/타임아웃), 토큰 추출, stdin 전달 확인(Windows `.CMD` 인자 손상 회귀), 격리된 cwd 실행(저장소 정보 유출 회귀). `ClaudeAgentProvider` 10종: stream-json 턴/도구 호출 파싱, 도구 대상만 기록(파일 본문 제외), max_turns는 예외 아닌 `stop_reason`, 에이전트 오류, result 메시지 없으면 실패, **안전 경계 3종이 전부 CLI 인자로 전달되는지**(`--permission-mode dontAsk`/경로 스코프 allow 규칙/`--disallowedTools` — 2026-07-27 실제로 뚫린 것의 회귀 방지), 차단 기록(`permission_denials`) 파싱 — `subprocess.run` 모킹 |
-| `test_phase3_api_provider.py` | 10 | Gemini 응답 파싱(멀티 파트), API 키 미설정/비정상 상태코드/네트워크 오류(URL 비노출)/JSON 아닌 200/빈 응답, 키 헤더 전달 확인, 429는 `ProviderError.is_quota_error` 플래그가 서고 나머지 상태코드는 안 서는지 — `requests.post` 모킹 |
+| `test_phase3_api_provider.py` | 10 | Gemini 응답 파싱(멀티 파트), API 키 미설정/비정상 상태코드/네트워크 오류(URL 비노출)/JSON 아닌 200/빈 응답, 키 헤더 전달 확인, 431는 `ProviderError.is_quota_error` 플래그가 서고 나머지 상태코드는 안 서는지 — `requests.post` 모킹 |
 | `test_phase4_safety_gate.py` | 7 | Safety 실패 시 검토 대기 진입, 승인(release)/반려(block), 중복 처리 방지, 잘못된 decision 거부, 검토 큐 목록/해소 후 제외 |
 | `test_phase5_failure_analysis.py` | 6 | 빈 워크스페이스, errors.json stage별 집계, safety_review.json finding 단위 집계, 예시 run_id 중복제거·3개 제한, 사유 없음 fallback |
 | `test_phase6_dashboard.py` | 13 | run 상태 판정 6종, plan.json 없을 때 direct_call 귀속, 평균 latency/cost, 패턴별 분리·정렬, HTML 렌더링 2종 |

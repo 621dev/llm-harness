@@ -57,7 +57,12 @@ SUPPORTED_PATTERNS = (
     "iterative_refinement",
     "agentic_task",
 )
-DEFAULT_PATTERN = "hierarchical_delegation"
+# **2026-08-10 수정**: 기본값이 `hierarchical_delegation`이었다 — 아래 주석이 "품질 차이가
+# 없는 경로를 기본값으로 둘 수 없다"고 적어둔 그 패턴이다. ADR 0009 강등이 이 상수에
+# 반영되지 않아, 새 도메인이 **강등된 패턴을 opt-in 제약으로 강제로 물고** 태어났다
+# (비용 1.5~3.2배, 우위 미입증). `fan_out_judge`는 유일한 자동 진입 패턴이므로(ADR 0010)
+# 기본값일 때 제약을 넣지 않는 게 맞고, 그래야 planner의 키워드 라우팅이 살아난다.
+DEFAULT_PATTERN = "fan_out_judge"
 
 # 키워드 자동 라우팅이 없어 `constraints`의 "team_pattern:<이름>" opt-in으로만
 # 진입하는 패턴. 고비용이거나 되돌리기 어려운 부수 효과가 있어 실수로 걸리면 안 되기

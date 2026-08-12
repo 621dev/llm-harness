@@ -446,6 +446,44 @@ class SyncWorktreeWithMainTest(unittest.TestCase):
         self.assertEqual(result["status"], "missing")
         self.assertIn("worktree prune", result["output"])  # 사람이 뭘 해야 하는지 안내
 
+    @patch("harness.cli._git")
+    def test_detached_head_is_reported_and_not_merged(self, mock_git: MagicMock) -> None:
+        """회귀 테스트(2026-08-10): detached HEAD worktree를 그대로 merge해서
+        `merged`("동기화 완료")로 보고했다. 두 가지가 잘못이었다 — 어느 브랜치에도 속하지
+        않는 병합 커밋이 쌓이고, "완료"가 거짓 안심을 준다.
+
+        detach를 네 번 겪었는데(08-03, 08-06, 08-10 두 번) **네 번 다 이 명령이 아니라
+        3단계 push 루프가 잡아냈다**(detached에서 push는 종료 코드로만 실패가 드러난다).
+        도구가 잡아야 한다."""
+
+        def fake_git(argv, cwd=None, **kwargs):  # noqa: ANN001, ANN003
+            stdout = "HEAD\n" if argv[:2] == ["rev-parse", "--abbrev-ref"] else ""
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout=stdout, stderr="")
+
+        mock_git.side_effect = fake_git
+
+        result = cli.sync_worktree_with_main(Path("/repo/detached-worktree"))
+
+        self.assertEqual(result["status"], "detached")
+        # 병합을 시도하지 않아야 한다 — 고아 커밋이 쌓이는 걸 막는 게 이 변경의 요점이다.
+        self.assertEqual(_merge_calls(mock_git), [])
+        self.assertIn("checkout -B", result["output"])  # 사람이 뭘 해야 하는지 안내
+
+    @patch("harness.cli.sync_worktree_with_main")
+    def test_detached_is_treated_as_a_problem_exit_code(self, mock_sync: MagicMock) -> None:
+        """detached가 `had_problem`에 들어가 종료 코드 1이 되는지. 라벨만 바꾸고 종료 코드를
+        0으로 두면 스크립트가 성공으로 읽는다."""
+        mock_sync.side_effect = [
+            {"path": "/repo/a", "branch": "HEAD", "status": "detached", "output": "재부착 필요"},
+        ]
+        ok = subprocess.CompletedProcess(args=["git"], returncode=0, stdout="", stderr="")
+        with patch("harness.cli._discover_git_worktrees", return_value=[Path("/repo/a")]), patch(
+            "harness.cli._git", return_value=ok
+        ), patch("harness.cli.open_pr_branches", return_value=frozenset()):
+            code = cli.cmd_worktree_sync(MagicMock())
+
+        self.assertEqual(code, 1)
+
     @patch("harness.cli.sync_worktree_with_main")
     def test_sync_continues_to_next_worktree_after_missing_one(self, mock_sync: MagicMock) -> None:
         """위 상황에서 여러 worktree를 한 번에 돌릴 때 뒤쪽이 실제로 처리되는지."""

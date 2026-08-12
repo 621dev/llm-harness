@@ -519,6 +519,28 @@ def sync_worktree_with_main(path: Path) -> dict[str, str]:
                 "output": "이전 병합이 충돌 상태로 멈춰 있다 — 해당 디렉터리에서 충돌을"
                 " 해결하거나 `git merge --abort`로 되돌린 뒤 다시 실행할 것",
             }
+        # detached HEAD면 **병합하지 않고 문제로 보고한다** (2026-08-10 추가).
+        #
+        # 그전에는 그대로 merge해서 `merged`("동기화 완료")로 보고했다. 두 가지가 잘못이다:
+        #   1. **어느 브랜치에도 속하지 않는 병합 커밋이 쌓인다.** 앱이 나중에 다른 브랜치를
+        #      배정하면 그 커밋들은 고아가 된다.
+        #   2. **"동기화 완료"가 거짓 안심을 준다.** detach를 네 번 겪었는데(08-03, 08-06,
+        #      08-10 두 번) 네 번 다 이 명령이 아니라 3단계 push 루프가 잡아냈다 —
+        #      detached에서 push는 종료 코드로만 실패가 드러난다.
+        #
+        # 처방은 v22 §5 규칙 5(확인 3종 → `checkout -B <원래 브랜치>`)이고, 여기서 자동으로
+        # 고치지 않는다 — 어느 브랜치로 되돌릴지는 사람이 판단할 몫이다(잘못 붙이면 커밋을
+        # 버린다).
+        if branch == "HEAD":
+            return {
+                "path": str(path),
+                "branch": branch,
+                "status": "detached",
+                "output": "detached HEAD다 — 병합하지 않았다(어느 브랜치에도 속하지 않는"
+                " 커밋이 쌓이는 것을 막기 위함). `git -C <경로> reflog -3`으로 원래 브랜치를"
+                " 확인하고, 그 브랜치의 후손인지·다른 워크트리가 쓰지 않는지·OPEN PR이 없는지"
+                " 확인한 뒤 `git -C <경로> checkout -B <원래 브랜치>`로 재부착할 것",
+            }
         before_commit = _current_commit(path)
         if branch == "main":
             result = _git(["merge", "--ff-only", "origin/main"], cwd=path)
@@ -602,6 +624,7 @@ _SYNC_STATUS_LABELS = {
     "error": "오류",
     "missing": "디렉터리 없음 — git worktree prune 필요",
     "skipped_open_pr": "건너뜀 — OPEN PR 브랜치(그 세션 소유)",
+    "detached": "detached HEAD — 병합 안 함, 재부착 필요",
 }
 
 
@@ -631,12 +654,12 @@ def cmd_worktree_sync(args: argparse.Namespace) -> int:
         print(f"{result['path']}  [{result['branch']}]  {label}")
         # missing도 사람이 조치해야 하는 상태다(등록만 남은 worktree → prune 필요).
         # 다만 나머지 worktree 동기화를 막지는 않는다(sync_worktree_with_main 참고).
-        if result["status"] in ("conflict", "error", "missing"):
+        if result["status"] in ("conflict", "error", "missing", "detached"):
             had_problem = True
             print(f"    {result['output']}")
 
     if had_problem:
-        print("\n충돌/오류가 발생한 worktree는 해당 디렉터리에서 직접 확인 후 수동으로 해결하세요.")
+        print("\n충돌/오류/detached가 발생한 worktree는 해당 디렉터리에서 직접 확인 후 수동으로 해결하세요.")
         return 1
     return 0
 

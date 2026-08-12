@@ -60,8 +60,12 @@ class CreateDomainTest(unittest.TestCase):
         task = json.loads((domain_dir / "examples" / "task.test-task.json").read_text(encoding="utf-8"))
         self.assertEqual(task["task_id"], "test-task")
         self.assertEqual(task["prompt"], "XX에 대해 조사해줘.")
-        # ADR 0009로 hierarchical_delegation이 opt-in이 되면서 기본 패턴도 제약을 받는다
-        self.assertEqual(task["constraints"], ["team_pattern:hierarchical_delegation"])
+        # **기본값은 제약을 넣지 않는다** (2026-08-10 변경). 그전 기본값이
+        # `hierarchical_delegation`이어서 새 도메인이 ADR 0009로 강등된 패턴을 opt-in
+        # 제약으로 강제로 물고 태어났다 — 우위 미입증 + 비용 1.5~3.2배. 기본값이
+        # `fan_out_judge`(유일한 자동 진입 패턴, ADR 0010)가 되면서 제약이 사라지고
+        # planner의 키워드 라우팅이 살아난다.
+        self.assertEqual(task["constraints"], [])
 
     def test_raises_if_domain_already_exists(self) -> None:
         new_domain.create_domain(
@@ -170,7 +174,16 @@ class VerifyDomainTest(unittest.TestCase):
         self.tmp_dir = Path(tempfile.mkdtemp(prefix="new-domain-test-"))
         self.addCleanup(lambda: shutil.rmtree(self.tmp_dir, ignore_errors=True))
 
-    def test_research_keyword_prompt_classifies_as_hierarchical_delegation(self) -> None:
+    def test_research_keyword_prompt_routes_to_fan_out_without_a_chain(self) -> None:
+        """기본값으로 만든 도메인은 **키워드 라우팅**으로 진입한다 (2026-08-10 개정).
+
+        이 테스트는 원래 같은 프롬프트가 `hierarchical_delegation`으로 간다고 고정하고
+        있었다. 그건 프롬프트 때문이 아니라 **스캐폴딩이 넣어준 opt-in 제약** 때문이었고,
+        그 제약 자체가 ADR 0009로 강등된 패턴을 기본값으로 강제하는 결함이었다.
+
+        체인 스캐폴딩 자체는 `test_all_supported_patterns_scaffold_and_route`가
+        `--pattern hierarchical_delegation`을 명시로 넘겨 계속 덮는다 — 커버리지는 유지된다.
+        """
         domain_dir = new_domain.create_domain(
             "test-domain",
             task_id="test-task",
@@ -179,18 +192,15 @@ class VerifyDomainTest(unittest.TestCase):
         )
 
         result = new_domain.verify_domain(
-            domain_dir, task_id="test-task", expected_pattern="hierarchical_delegation"
+            domain_dir, task_id="test-task", expected_pattern="fan_out_judge"
         )
 
-        # ADR 0009 이후에도 이 케이스는 통과한다 — 프롬프트 키워드가 아니라 스캐폴딩이
-        # 넣어준 `team_pattern:` 제약으로 체인에 진입하기 때문이다(그게 opt-in의 요점).
-        self.assertEqual(result["team_pattern"], "hierarchical_delegation")
+        # "조사"가 "설계"보다 먼저 검사되므로(router의 `_TASK_TYPE_RULES` 순서) research다.
         self.assertEqual(result["task_type"], "research")
+        self.assertEqual(result["team_pattern"], "fan_out_judge")
         self.assertTrue(result["pattern_matches_expected"])
-        self.assertEqual(
-            [role for role, _ in result["delegation_chain"]],
-            ["research", "design_review", "content_finalization"],
-        )
+        # 기본값이 체인을 강제하지 않는다는 게 이 변경의 요점이다.
+        self.assertEqual(result["delegation_chain"], [])
 
     def test_prompt_without_routing_keywords_flags_mismatch(self) -> None:
         """기대 패턴과 실제 분류가 어긋나면 불일치로 보고하는지.
