@@ -80,6 +80,11 @@ _ALLOWED_INTERNAL_IMPORTS: dict[str, set[str]] = {
         "failure_analysis",
         "learning",  # `learn` 서브커맨드가 집계를 읽어 사람에게 보여준다
         "live_status",
+        # config의 max_parallel_candidates를 반영하는 자리(2026-08-13). 다른 설정값은
+        # 소비자가 orchestrator라 그쪽에 넣지만, 후보 병렬 실행을 실제로 쓰는 건
+        # model_runner다 — 값을 orchestrator에 두고 다시 넘기면 같은 값이 전역 두 곳에
+        # 생긴다. cli는 최상위 계층이라 아래를 직접 설정해도 방향이 뒤집히지 않는다.
+        "model_runner",
         "orchestrator",
         "config",
         "schemas",

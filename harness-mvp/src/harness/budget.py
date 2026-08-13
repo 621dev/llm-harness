@@ -23,6 +23,7 @@
 """
 from __future__ import annotations
 
+import threading
 from typing import Optional
 
 from .schemas import Candidate
@@ -47,6 +48,11 @@ class BudgetTracker:
         self.limit_calls = limit_calls
         self.spent_usd = 0.0
         self.subscription_calls = 0
+        # fan-out 후보가 병렬로 돌 때 `add()`가 여러 스레드에서 동시에 불린다
+        # (2026-08-13, `model_runner._generate_in_parallel`). `x += y`는 읽기-더하기-쓰기
+        # 세 단계라 원자적이지 않아서, 두 스레드가 같은 값을 읽으면 **한쪽 비용이
+        # 조용히 사라진다** — 비용을 실제보다 적게 보고하는 건 Cost Blindness 그 자체다.
+        self._lock = threading.Lock()
 
     @property
     def unlimited(self) -> bool:
@@ -89,8 +95,9 @@ class BudgetTracker:
         (`generate_with_retry`가 `subscription_calls`를 attempts로 세는 것과 같은 이유).
         `cost_usd`가 `None`인 구독 호출은 금액에 0을 더하고 횟수로만 잡힌다.
         """
-        self.spent_usd += candidate.cost_usd or 0.0
-        self.subscription_calls += candidate.subscription_calls
+        with self._lock:
+            self.spent_usd += candidate.cost_usd or 0.0
+            self.subscription_calls += candidate.subscription_calls
 
     def snapshot(self) -> dict:
         """metrics/errors에 남길 현재 상태."""

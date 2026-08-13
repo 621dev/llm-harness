@@ -14,13 +14,15 @@ from __future__ import annotations
 import shutil
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from harness import model_runner, run_store  # noqa: E402
-from harness.schemas import ProviderConfig  # noqa: E402
+from harness.budget import BudgetTracker  # noqa: E402
+from harness.schemas import Candidate, ProviderConfig  # noqa: E402
 from providers.base import Provider, ProviderError  # noqa: E402
 from providers.mock import MockProvider  # noqa: E402
 
@@ -232,6 +234,118 @@ class RetryClassificationTest(unittest.TestCase):
         candidate = model_runner.generate_with_retry(provider, "질문")
 
         self.assertNotIn("1차:", candidate.content)
+
+
+class _BlockingProvider(Provider):
+    """모든 provider가 도착할 때까지 응답을 붙잡는다 — 병렬이 아니면 영원히 안 끝난다.
+
+    "빨라졌는지"를 시간으로 재면 느린 머신/CI에서 흔들린다. 대신 **동시에 열려 있지
+    않으면 통과할 수 없는 조건**을 쓴다: 각 호출이 barrier에서 서로를 기다리므로,
+    순차 실행이면 첫 호출이 나머지를 기다리다 타임아웃으로 실패한다.
+    """
+
+    def __init__(self, model_id: str, barrier: threading.Barrier) -> None:
+        super().__init__(ProviderConfig(provider_id=model_id, model_id=model_id))
+        self._barrier = barrier
+        self.calls = 0
+
+    def generate(self, prompt: str, *, temperature: float = 0.7) -> Candidate:
+        self.calls += 1
+        self._barrier.wait(timeout=10)  # 시간 초과면 BrokenBarrierError -> 테스트 실패
+        return Candidate(
+            model_id=self.model_id, content=f"{self.model_id} 응답", tokens=1,
+            latency_ms=1, cost_usd=None, status="success",
+        )
+
+
+class ParallelFanOutTest(unittest.TestCase):
+    """후보 병렬 생성 (2026-08-13).
+
+    후보는 정의상 서로 독립인데(같은 프롬프트, 서로의 결과를 안 봄) 순차로 돌아서
+    실측 지연이 direct의 4.5배였다(fan_out 238초 vs direct 53초). **토큰/비용은
+    그대로이고 벽시계만 줄어든다** — 그래서 여기서 검증할 것은 "동시에 열리는가"와
+    "그 대가로 잃은 게 없는가(순서·파일·예산 상한)"뿐이다.
+    """
+
+    def setUp(self) -> None:
+        self.tmp_dir = Path(tempfile.mkdtemp(prefix="harness-parallel-"))
+        self.addCleanup(shutil.rmtree, self.tmp_dir, ignore_errors=True)
+        self.run_dir = run_store.create_run(run_id="run-parallel", root=self.tmp_dir)
+        self._saved = model_runner.MAX_PARALLEL_CANDIDATES
+        self.addCleanup(setattr, model_runner, "MAX_PARALLEL_CANDIDATES", self._saved)
+
+    def _blocking(self, count: int) -> list[_BlockingProvider]:
+        barrier = threading.Barrier(count)
+        return [_BlockingProvider(f"model-{i}", barrier) for i in range(count)]
+
+    def test_candidates_are_generated_concurrently(self) -> None:
+        """핵심: 세 호출이 동시에 열려 있어야 barrier가 풀린다."""
+        providers = self._blocking(3)
+
+        candidates = model_runner.run_all("질문", providers, self.run_dir)
+
+        self.assertEqual([c.status for c in candidates], ["success"] * 3)
+        self.assertEqual([p.calls for p in providers], [1, 1, 1])
+
+    def test_return_order_follows_provider_order_not_completion_order(self) -> None:
+        """완료 순서는 실행마다 달라진다 — 그걸 그대로 돌려주면 산출물이 흔들린다."""
+        providers = self._blocking(3)
+
+        candidates = model_runner.run_all("질문", providers, self.run_dir)
+
+        self.assertEqual([c.model_id for c in candidates], ["model-0", "model-1", "model-2"])
+
+    def test_every_candidate_file_is_written(self) -> None:
+        """병렬 경로도 후보마다 파일을 남긴다 (파일 기반 하네스의 전제)."""
+        providers = self._blocking(3)
+
+        model_runner.run_all("질문", providers, self.run_dir)
+
+        written = sorted(p.name for p in (self.run_dir / "artifacts" / "candidates").glob("*.md"))
+        self.assertEqual(written, ["model-0.md", "model-1.md", "model-2.md"])
+
+    def test_setting_one_restores_sequential_execution(self) -> None:
+        """1로 두면 예전 동작으로 완전히 돌아간다 — rate limit이 겹치는 구성의 탈출구."""
+        model_runner.MAX_PARALLEL_CANDIDATES = 1
+        providers = make_providers()
+
+        candidates = model_runner.run_all("질문", providers, self.run_dir)
+
+        self.assertEqual(len(candidates), 3)
+        self.assertEqual(model_runner._worker_count(providers, None), 1)
+
+    def test_budget_limit_forces_sequential(self) -> None:
+        """**금액이 걸린 안전장치를 지연 단축과 바꾸지 않는다.**
+
+        상한이 가진 힘은 "다음 호출을 시작하지 않는 것" 하나뿐인데, 병렬로 던지면 그
+        호출들이 이미 날아간 뒤라 막을 대상이 없어진다. 상한이 있으면 순차로 돈다.
+        """
+        providers = make_providers()
+
+        self.assertEqual(model_runner._worker_count(providers, BudgetTracker(limit_usd=0.02)), 1)
+        self.assertEqual(model_runner._worker_count(providers, BudgetTracker(limit_calls=1)), 1)
+        # 상한이 둘 다 없으면 exhausted가 영원히 False라 순차/병렬 호출 수가 같다
+        self.assertGreater(model_runner._worker_count(providers, BudgetTracker()), 1)
+        self.assertGreater(model_runner._worker_count(providers, None), 1)
+
+    def test_parallel_cost_accumulation_loses_nothing(self) -> None:
+        """`+=`는 원자적이지 않다 — 락이 없으면 비용이 조용히 사라진다(Cost Blindness)."""
+        count = 8
+        model_runner.MAX_PARALLEL_CANDIDATES = count
+        barrier = threading.Barrier(count)
+
+        class _Priced(_BlockingProvider):
+            def generate(inner, prompt: str, *, temperature: float = 0.7):  # noqa: N805
+                candidate = super().generate(prompt, temperature=temperature)
+                candidate.cost_usd = 0.01
+                return candidate
+
+        providers = [_Priced(f"m{i}", barrier) for i in range(count)]
+        tracker = BudgetTracker()  # 상한 없음 -> 병렬 경로
+
+        model_runner.run_all("질문", providers, self.run_dir, budget=tracker)
+
+        self.assertAlmostEqual(tracker.spent_usd, 0.01 * count, places=9)
 
 
 if __name__ == "__main__":

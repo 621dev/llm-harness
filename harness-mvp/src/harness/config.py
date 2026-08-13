@@ -57,6 +57,13 @@ class HarnessConfig(BaseModel):
     - max_subscription_candidates: fan_out_judge 한 run에서 동시에 쓸 수
       있는 auth_mode="cli_subscription" provider 최대 개수(Section 9 구독
       한도 보호).
+    - max_parallel_candidates: fan_out_judge 후보를 동시에 몇 개까지 만들지
+      (2026-08-13). 후보는 서로 독립이라 순차로 기다릴 이유가 없었다 — 실측
+      지연이 direct의 4.5배였다. **비용/토큰은 바뀌지 않고 대기 시간만 줄어든다.**
+      1로 두면 예전처럼 순차 실행. 예산 상한(budget_usd/
+      budget_subscription_calls)이 설정돼 있으면 이 값과 무관하게 순차로 도는데,
+      병렬로 던지면 "다음 호출을 시작하지 않는다"는 상한의 유일한 수단이
+      무력해지기 때문이다(`model_runner._worker_count`).
     - max_refinement_rounds: iterative_refinement의 라운드 상한(ADR 0006).
       라운드마다 generator+evaluator 2회 호출이 발생하므로 비용에 직결된다 —
       최악의 경우 LLM 호출 수는 이 값 × 2 (+재시도).
@@ -96,6 +103,7 @@ class HarnessConfig(BaseModel):
     delegation_role_models: dict[str, str] = Field(default_factory=dict)
     delegation_role_fallback_models: dict[str, str] = Field(default_factory=dict)
     max_subscription_candidates: int = 1
+    max_parallel_candidates: int = 4
     max_refinement_rounds: int = 3
     max_agent_turns: int = 8
     budget_usd: Optional[float] = None

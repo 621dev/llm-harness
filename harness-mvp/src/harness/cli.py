@@ -59,7 +59,7 @@ from providers.base import Provider
 from providers.cli_subscription_provider import ClaudeAgentProvider, ClaudeCliProvider, CodexCliProvider
 from providers.fallback_provider import QuotaFallbackProvider
 
-from . import dashboard, failure_analysis, learning, live_status, orchestrator
+from . import dashboard, failure_analysis, learning, live_status, model_runner, orchestrator
 from .config import HarnessConfig, load_config
 from .schemas import ProviderConfig, TaskInput
 
@@ -193,6 +193,8 @@ def _providers_from_args(args: argparse.Namespace) -> dict[str, Provider]:
     Section 9)."""
     config = load_config()
     orchestrator.MAX_SUBSCRIPTION_CANDIDATES = config.max_subscription_candidates
+    # 후보 병렬 실행은 model_runner가 담당하므로 값도 그쪽에 둔다(orchestrator 경유 없음).
+    model_runner.MAX_PARALLEL_CANDIDATES = config.max_parallel_candidates
     orchestrator.MAX_REFINEMENT_ROUNDS = config.max_refinement_rounds
     orchestrator.MAX_AGENT_TURNS = config.max_agent_turns
     orchestrator.BUDGET_USD = config.budget_usd
