@@ -26,8 +26,8 @@ rubric 합격 판정(judge.check_pass, ADR 0006에서 추가)으로 품질을 �
 
 사용법 (harness-mvp 디렉토리에서):
   PYTHONPATH=src python scripts/measure_pattern_value.py [--k 3]
-  PYTHONPATH=src python scripts/measure_pattern_value.py --conditions direct,fan_out
-  PYTHONPATH=src python scripts/measure_pattern_value.py --conditions direct,fan_out --prompt diagnostic
+  PYTHONPATH=src python scripts/measure_pattern_value.py --conditions direct,fan_out,delegation
+  PYTHONPATH=src python scripts/measure_pattern_value.py --conditions direct,fan_out,delegation --prompt diagnostic
   PYTHONPATH=src python scripts/measure_pattern_value.py --generator claude --evaluator codex
 gemini를 쓰면 GEMINI_API_KEY, claude/codex를 쓰면 해당 CLI 로그인이 필요하다.
 
@@ -47,7 +47,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
-from harness import cli as cli_module  # noqa: E402  (체인 역할 목록 재사용)
 from harness import judge, model_runner, orchestrator, run_store  # noqa: E402
 from harness.schemas import Candidate, ProviderConfig, TaskInput  # noqa: E402
 from providers.api_provider import GeminiApiProvider  # noqa: E402
@@ -270,23 +269,20 @@ def run_direct(attempt: int) -> dict:
 # content_finalization은 2026-07-28 merge된 PR #64로 research 체인에 3번째
 # 역할로 추가됐다(그때 이 스크립트가 실제로 깨졌다). 엔진의 역할 목록을 직접
 # 가져와서, 앞으로 역할이 늘어도 여기 손 안 대게 한다.
-_CHAIN_ROLE_PROVIDER_IDS = tuple(f"{role}-mock" for role in cli_module._DELEGATION_ROLES)
 
 
-# 조건 C(부서형 체인)의 역할 구성. 2026-07-29 `delegation_roles:` override로 추가됐다 —
-# **역할을 3개에서 5개로 늘리는 것 자체에 값이 있는지**를 보는 조건이다. 3단계 체인이
-# 2차 측정에서 direct_call과 동률이었으므로, 여기서도 동률이면 "역할 세분화로는 값이
-# 안 나온다"가 되고 DAG 패턴(분업 병렬/분기)을 만들 근거가 사라진다.
-DEPARTMENT_ROLES = ("research", "drafting", "compliance_review", "editing", "content_finalization")
+def run_delegation(attempt: int, root: Path, *, workers: int = 2, label: str = "delegation") -> dict:
+    """조건 B: 매니저-워커 위임 (ADR 0014 재작성 후).
 
-
-def run_chain(attempt: int, root: Path, *, roles: tuple[str, ...] | None = None, label: str = "chain") -> dict:
-    """조건 B/C: orchestrator를 통해 hierarchical_delegation 실행(역할 전부 같은 백엔드).
-
-    `roles`를 주면 `delegation_roles:` override로 그 부서 구성을 쓴다(조건 C).
-    안 주면 planner의 기본 체인 3단계(조건 B).
+    **예전 `chain`/`departments` 조건을 대체한다.** 그 둘은 역할 순차 위임을 쟀는데
+    재작성으로 역할 자체가 없어졌다. 재는 축도 달라졌다 — ADR 0009는 합격률을 쟀지만
+    이 패턴이 주장하는 건 **매니저 토큰 절약**이다. 그래서 `step_input_tokens` 대신
+    조각 수와 매니저/워커 자리별 입력을 남긴다.
     """
-    providers: dict = {pid: _generator(pid) for pid in _CHAIN_ROLE_PROVIDER_IDS}
+    providers: dict = {orchestrator.MANAGER_PROVIDER_KEY: _generator("manager")}
+    for index in range(1, workers + 1):
+        key = f"{orchestrator.WORKER_PROVIDER_PREFIX}:worker{index}"
+        providers[key] = _generator(key)
     providers[orchestrator.JUDGE_PROVIDER_KEY] = _evaluator("judge")
     # **패턴을 항상 명시한다.** 예전엔 `roles`가 없으면 constraints를 비워서 planner의
     # 키워드 라우팅에 맡겼는데, ADR 0009(2026-07-29)로 **키워드 라우팅이 전부
@@ -294,15 +290,18 @@ def run_chain(attempt: int, root: Path, *, roles: tuple[str, ...] | None = None,
     # 바로 잡았다. 안 잡혔으면 `chain` 라벨로 fan_out 숫자를 측정해 체인 결과로
     # 기록했을 것이다. 측정 조건은 라우팅 규칙 변경에 흔들려선 안 된다.
     constraints = ["team_pattern:hierarchical_delegation"]
-    if roles:
-        constraints.append(f"delegation_roles:{','.join(roles)}")
     task = TaskInput(task_id=f"measure-{label}-{attempt}", prompt=PROMPT, constraints=constraints)
     observation = orchestrator.run(task, providers, root=root)
     run_dir = root / f"run-measure-{label}-{attempt}"
     ok = observation.status in ("success", "warning") and (run_dir / "final.md").exists()
     content = run_store.read_markdown(run_dir, "final.md") if ok else ""
     metrics = run_store.read_json(run_dir, "metrics.json")
-    plan = run_store.read_json(run_dir, "plan.json")
+    delegation_plan = (
+        run_store.read_json(run_dir, "delegation.json")
+        if (run_dir / "delegation.json").exists()
+        else {"parts": []}
+    )
+    parts = delegation_plan.get("parts", [])
     return {
         "condition": label,
         "attempt": attempt,
@@ -311,38 +310,88 @@ def run_chain(attempt: int, root: Path, *, roles: tuple[str, ...] | None = None,
         "latency_ms": metrics["latency_ms"],
         "cost_usd": metrics["estimated_cost_usd"],
         "subscription_calls": metrics.get("subscription_calls", 0),
-        # 체인 스텝 수 + evaluator 1회. 역할이 늘면 자동으로 반영된다.
-        "llm_calls": len(plan["delegation_chain"]) + 1,
-        "roles": [step["role"] for step in plan["delegation_chain"]],
-        # 스텝별 입력 토큰 (2026-07-29). 체인은 스텝마다 이전 결과를 전부 받아 입력이
-        # 계단식으로 커진다 — 어디서 얼마나 커지는지 안 남기면 "요약 전달이 필요한
-        # 시점"을 추측으로 판단하게 된다.
-        "step_input_tokens": _step_input_tokens(run_dir, plan),
+        # 분해 1 + 조각 N + 평가 1. 조립은 concat이면 0회다(ADR 0014).
+        "llm_calls": 1 + len(parts) + 1,
+        "parts": [p.get("title") for p in parts],
+        # **재는 축이 바뀌었다.** 체인은 스텝마다 앞 결과를 받아 입력이 계단식으로 커져서
+        # `step_input_tokens`로 그 계단을 봤다. 조각은 서로를 안 보므로 계단이 없고,
+        # 대신 확인할 것은 **자리별 입력**이다 — 매니저가 정말 작게 쓰는지, 워커 입력이
+        # 조각 수에 선형인지. 그게 이 패턴이 주장하는 전부다.
+        "part_input_tokens": [p.get("input_tokens") for p in parts],
+        "part_chars": [p.get("chars") for p in parts],
     }
 
 
-def _step_input_tokens(run_dir: Path, plan: dict) -> list[int | None]:
-    """스텝 파일 헤더의 `- input_tokens:` 값을 순서대로 뽑는다.
+def run_fan_out(
+    attempt: int,
+    root: Path,
+    *,
+    backends: tuple[str, ...] | None = None,
+    label: str = "fan_out",
+) -> dict:
+    """조건 D/E: orchestrator를 통해 fan_out_judge 실행.
 
-    **`plan.json`의 `output_ref`를 쓰면 안 된다** — plan은 체인 실행 *전에* 저장되므로
-    거기 `output_ref`는 전부 null이다(실행 중 step 객체만 갱신된다). 파일명 규칙으로
-    직접 구성한다(`run_store.chain_step_path`와 같은 규칙 — 2026-07-29 mock 검증에서
-    전부 None이 나와서 발견했다).
+    `backends`를 주면 후보를 그 백엔드들로 만든다(조건 E — 모델 다양성). 안 주면
+    `--generator` 백엔드를 후보 수만큼 복제한다(조건 D — 구조 효과만).
 
-    파싱 실패는 None으로 남기고 측정을 계속한다 — 부가 관측이 측정 자체를 죽이면
-    배보다 배꼽이 크다(`learning.record_run`과 같은 판단).
+    후보 provider를 `_LabeledProvider`로 감싸는 이유는 그쪽 docstring 참고 —
+    같은 백엔드를 N개 슬롯으로 쓰면 `model_id`가 겹쳐서 산출물 파일과 승자 판정이
+    둘 다 망가진다. 백엔드가 서로 다르면 겹치지 않지만, **조건 간 산출물 이름 규칙을
+    같게 유지**하려고 양쪽 다 감싼다.
     """
+    slots = backends if backends is not None else (_GENERATOR_BACKEND,) * FAN_OUT_CANDIDATES
+    providers: dict = {
+        f"cand-{i}": _LabeledProvider(_with_safety_net(backend, f"cand-{i}"), i)
+        for i, backend in enumerate(slots, start=1)
+    }
+    providers[orchestrator.JUDGE_PROVIDER_KEY] = _evaluator("judge")
+    # fan_out_judge는 기본 패턴이지만 측정에서는 명시한다 — 라우팅 규칙이 나중에
+    # 바뀌어도 이 조건이 조용히 다른 패턴을 재게 되는 일이 없어야 한다.
+    task = TaskInput(
+        task_id=f"measure-{label}-{attempt}",
+        prompt=PROMPT,
+        constraints=["team_pattern:fan_out_judge"],
+    )
+    observation = orchestrator.run(task, providers, root=root)
+    run_dir = root / f"run-measure-{label}-{attempt}"
+    ok = observation.status in ("success", "warning") and (run_dir / "final.md").exists()
+    metrics = run_store.read_json(run_dir, "metrics.json")
+    return {
+        "condition": label,
+        "attempt": attempt,
+        "ok": ok,
+        "content": run_store.read_markdown(run_dir, "final.md") if ok else "",
+        "latency_ms": metrics["latency_ms"],
+        "cost_usd": metrics["estimated_cost_usd"],
+        "subscription_calls": metrics.get("subscription_calls", 0),
+        "llm_calls": len(slots) + 1,  # 후보 N + judge 1
+        # 어느 백엔드 조합으로 잰 건지 남긴다 — 다양성 조건은 이게 곧 측정 대상이다.
+        "roles": list(slots),
+        # 체인과 달리 fan_out은 입력이 **누적되지 않는다** — 후보마다 같은 프롬프트를
+        # 독립적으로 받는다. 그 구조 차이가 숫자로 보이도록 같은 키에 담는다.
+        "step_input_tokens": _candidate_input_tokens(run_dir),
+    }
+
+
+def _candidate_input_tokens(run_dir: Path) -> list[int | None]:
+    """후보 산출물 헤더의 `- input_tokens:`를 전부 뽑는다(파일명은 model_id)."""
+    candidates_dir = run_dir / "artifacts" / "candidates"
+    if not candidates_dir.is_dir():
+        return []
     values: list[int | None] = []
-    for index, step in enumerate(plan["delegation_chain"], start=1):
+    for path in sorted(candidates_dir.glob("*.md")):
         try:
-            text = run_store.read_markdown(run_dir, f"artifacts/chain/step-{index}-{step['role']}.md")
-            line = next(ln for ln in text.splitlines() if ln.startswith("- input_tokens:"))
+            line = next(
+                ln for ln in path.read_text(encoding="utf-8").splitlines()
+                if ln.startswith("- input_tokens:")
+            )
             values.append(int(line.split(":", 1)[1].strip()))
-        except (OSError, KeyError, StopIteration, ValueError):
+        except (OSError, StopIteration, ValueError):
             values.append(None)
     return values
 
 
+# 측정할 수 있는 조건. 새 조건을 추가하려면 여기와 `_run_condition`만 손대면 된다.
 # 조건 D(fan_out_judge)의 후보 수. 2026-07-29에 추가 — 이 패턴은 기계 장치가 가장
 # 많은데(judge + synthesizer + blind 익명화 + 구독 후보 상한) 그때까지 **비교 측정
 # 0회**였다.
@@ -450,14 +499,14 @@ def _candidate_input_tokens(run_dir: Path) -> list[int | None]:
 
 
 # 측정할 수 있는 조건. 새 조건을 추가하려면 여기와 `_run_condition`만 손대면 된다.
-CONDITIONS = ("direct", "chain", "departments", "fan_out", "fan_out_mixed")
+CONDITIONS = ("direct", "delegation", "fan_out", "fan_out_mixed")
 
 
 # 조건별 시도당 LLM 호출 수(생성 + 판정 1회). 시작 전에 규모를 보여주기 위한 추정이다.
 _CALLS_PER_ATTEMPT = {
     "direct": 1 + 1,
-    "chain": 3 + 1,
-    "departments": len(DEPARTMENT_ROLES) + 1,
+    # 분해 1 + 조각 N(기본 2) + 평가 1. 조립은 concat이라 0회다(ADR 0014).
+    "delegation": 1 + 2 + 1,
     "fan_out": FAN_OUT_CANDIDATES + 1 + 1,  # 후보 N + judge 1 + 합격 판정 1
     "fan_out_mixed": len(MIXED_FAN_OUT_BACKENDS) + 1 + 1,
 }
@@ -470,10 +519,8 @@ def _estimate_total_calls(conditions: list[str], k: int) -> int:
 def _run_condition(label: str, attempt: int, chain_root: Path) -> dict:
     if label == "direct":
         return run_direct(attempt)
-    if label == "chain":
-        return run_chain(attempt, chain_root)
-    if label == "departments":
-        return run_chain(attempt, chain_root, roles=DEPARTMENT_ROLES, label="departments")
+    if label == "delegation":
+        return run_delegation(attempt, chain_root)
     if label == "fan_out":
         return run_fan_out(attempt, chain_root)
     if label == "fan_out_mixed":

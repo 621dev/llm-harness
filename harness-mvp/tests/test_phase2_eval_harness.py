@@ -51,11 +51,18 @@ def mostly_failing_fan_out_providers(_attempt_index: int) -> dict[str, MockProvi
 
 
 def reliable_delegation_providers(_attempt_index: int) -> dict[str, MockProvider]:
-    roles = ["research", "design_review", "content_finalization"]
-    return {
-        f"{role}-mock": MockProvider(ProviderConfig(provider_id=f"{role}-mock", model_id=f"{role}-mock"))
-        for role in roles
+    """매니저 1개 + 워커 2개 (ADR 0014로 역할 provider가 매니저-워커로 바뀌었다)."""
+    providers = {
+        orchestrator.MANAGER_PROVIDER_KEY: MockProvider(
+            ProviderConfig(provider_id="manager", model_id="manager-mock"), profile="manager"
+        )
     }
+    for index in (1, 2):
+        key = f"{orchestrator.WORKER_PROVIDER_PREFIX}:worker{index}"
+        providers[key] = MockProvider(
+            ProviderConfig(provider_id=key, model_id=f"worker{index}-mock"), profile="detailed"
+        )
+    return providers
 
 
 class GraderTest(unittest.TestCase):

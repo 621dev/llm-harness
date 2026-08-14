@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import io  # noqa: F401  (measure_pattern_value가 stdout 래핑에 쓴다 — 위 주석 참고)
+import json
 import sys
 from pathlib import Path
 
@@ -65,6 +66,21 @@ class _FakeProvider(Provider):
             content = "{" + body + "}"
         elif '"passed"' in prompt:
             content = '{"unmet_items": [], "passed": true, "feedback": ""}'
+        elif '"document_title"' in prompt:
+            # delegation 조건의 **분해** 요청 (ADR 0014). 실제 매니저처럼 JSON을 내야
+            # `_parse_plan`을 통과한다 — 일반 텍스트를 주면 조각이 0개가 되어 조건이
+            # 통째로 실패한다(이 검증을 처음 돌렸을 때 실제로 그랬다).
+            content = json.dumps(
+                {
+                    "document_title": "mock 문서",
+                    "intro": "mock 머리글",
+                    "parts": [
+                        {"title": f"섹션 {i}", "instruction": f"섹션 {i}를 작성하라"}
+                        for i in (1, 2)
+                    ],
+                },
+                ensure_ascii=False,
+            )
         else:
             content = f"mock 본문 ({self.model_id}) — 방화벽/포트/DNS 설명 " + "가" * 200
         return Candidate(
@@ -110,16 +126,21 @@ def main() -> int:
         result = m.evaluate(m._run_condition(label, 1, root))
         results.append(result)
 
+        # 공통 키 + 조건별 입력 토큰 키. `delegation`은 ADR 0014 재작성으로 재는 축이
+        # 바뀌었다 — 스텝별 계단(step_input_tokens)이 아니라 조각별 입력(part_input_tokens)이다.
+        input_token_key = "part_input_tokens" if label == "delegation" else "step_input_tokens"
         required = {"condition", "attempt", "ok", "content", "latency_ms", "cost_usd",
-                    "subscription_calls", "llm_calls", "roles", "step_input_tokens",
+                    "subscription_calls", "llm_calls", input_token_key,
                     "passed", "feedback"}
+        if label != "delegation":
+            required.add("roles")
         missing = required - set(result)
         failures += not _check("결과 키 완비", not missing, f"누락 {sorted(missing)}" if missing else "")
         failures += not _check("실행 성공", result["ok"], (result.get("content") or "")[:80])
         # 4차 측정에서 전부 None으로 나왔던 자리 — 증폭 배수 계산의 전제다.
-        tokens = result["step_input_tokens"]
+        tokens = result[input_token_key]
         failures += not _check(
-            "step_input_tokens 채워짐", bool(tokens) and all(t is not None for t in tokens), f"{tokens}"
+            f"{input_token_key} 채워짐", bool(tokens) and all(t is not None for t in tokens), f"{tokens}"
         )
         failures += not _check(
             "예상 호출 수 == 실제", m._CALLS_PER_ATTEMPT[label] == len(_CALL_LOG),

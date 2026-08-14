@@ -35,7 +35,7 @@ ADR 0013(체인 최종 산출물을 발행물 하나로 — ADR 0008 개정).
 cd harness-mvp
 pip install -e .[dev]                                     # pydantic + pytest 설치
 
-python -m pytest tests/ -v                                # 437개, 전부 mock — 실제 CLI/API 미호출
+python -m pytest tests/ -v                                # 449개, 전부 mock — 실제 CLI/API 미호출
 
 PYTHONPATH=src python -m harness.cli run --task examples/task.fan_out.json
 PYTHONPATH=src python -m harness.cli run --task examples/task.fan_out.json --models claude,gemini  # 이 실행만 후보 모델 오버라이드(codex 제외)
@@ -104,6 +104,7 @@ Windows PowerShell: `$env:PYTHONPATH="src"; python -m harness.cli run --task ...
 | `src/harness/run_store.py` | run 디렉토리 입출력 — 생성/조회, JSON/Markdown 저장·로드 |
 | `src/providers/base.py`, `mock.py` | `Provider` 인터페이스 + 결정적 `MockProvider`(프로필 3종, 실패 주입 가능) |
 | `src/harness/model_runner.py` | fan_out_judge 독립 후보 생성(`run_all` — 후보는 서로 독립이라 **기본적으로 병렬**, `MAX_PARALLEL_CANDIDATES`. 토큰/비용은 그대로고 대기 시간만 줄어든다. **예산 상한이 설정돼 있으면 순차로 돈다** — 병렬로 던지면 "다음 호출을 시작하지 않는다"는 상한의 유일한 수단이 무력해지므로), 적합성 게이트 탈락 시 단일 호출(`direct_call`), 공통 재시도(`generate_with_retry` — 모든 `generate()` 호출이 지나는 유일한 지점이라 구독 호출 횟수도 여기서 센다, 실패한 재시도도 한도를 소모하므로 함께 계상) |
+| `src/harness/delegation.py` | **매니저-워커 위임**(ADR 0014, `hierarchical_delegation` 재작성). 분해(`decompose` — 매니저 1회, 겹치지 않는 조각 목록) → 조각 실행(`run_workers` — **조각끼리 서로를 안 본다**, 전문은 `artifacts/parts/`에만) → 조립(`assemble` — `concat`은 LLM 호출 0회 / `llm`은 조각 총량 × 1회). 입력 증폭이 조각 수에 **선형**이다 — 체인은 제곱에 가까웠다(3역할 78배) |
 | `src/harness/subagent_runner.py` | hierarchical_delegation 체인 실행(`delegate`/`run_chain`), 컨텍스트 격리 시뮬레이션, `read_step_content()`(스텝 파일에서 디버깅용 헤더를 뺀 본문만 — 다음 스텝 프롬프트와 final.md 양쪽에 쓰인다, ADR 0008), 역할별 지시문 스코핑(`_apply_role_instruction` — 첫 스텝/이어받는 스텝을 구분해 "당신의 역할은 X" 문구를 입력에 덧붙임, 2026-07-27 server-engineering-learning 도메인 실제 e2e에서 codex 타임아웃 원인 발견 후 추가). `run_chain()`은 이어받는 스텝(2번째 이후)에 직전 스텝 출력만이 아니라 **원본 요청 + 지금까지 모든 스텝 결과를 누적한 히스토리**를 넘긴다(2026-07-27 content_finalization 역할 추가 중 발견 — 안 그러면 마지막 스텝이 바로 직전 비평만 보고 최초 초안을 못 봄). 지시문 템플릿엔 "파일을 만들거나 승인을 요청하지 말고 결과물을 응답 텍스트로 직접 작성하라"는 문구도 포함(claude CLI가 완성물 대신 작업 보고문만 내던 문제 실측 후 추가) |
 | `src/harness/agent_runner.py` | agentic_task 전용 — 자율 에이전트 실행을 감싸는 층(ADR 0007). 격리된 `artifacts/agent_workspace/` 준비, 실행 후 **실제 파일 시스템 스캔**으로 산출물 판정(에이전트 자기 보고 불신), 턴별 도구 호출을 `agent_turns.json`으로 기록. 도구 허용목록/턴 상한 같은 실행 시점 제약은 provider가 CLI 인자로 강제 |
 | `src/harness/router.py` | 적합성 게이트(`check_fitness`) + team_pattern 사전 분류(`classify_team_pattern`) |
@@ -322,7 +323,7 @@ dashboard/failure_analysis/live_status → cli). CI 없는 프로젝트라 "린�
 검증**: `schemas.py`에 `from . import orchestrator`(역방향) 임시 추가 →
 테스트가 정확히 잡아내는 것 확인 후 원복.
 
-## 테스트 (437개, 전부 통과)
+## 테스트 (449개, 전부 통과)
 
 새 테스트 파일 추가/파일별 개수 변경 시 이 표도 같이 갱신(2026-07-24 문서
 감사에서 실제(239개)와 다른 옛 숫자(141개)로 오래 방치된 것 발견 —
@@ -339,6 +340,7 @@ dashboard/failure_analysis/live_status → cli). CI 없는 프로젝트라 "린�
 | `test_step5_router.py` | 11 | 적합성 게이트, team_pattern 사전 분류, direct_call |
 | `test_step6_judge_synthesizer.py` | 15 | judge_provider 호출/응답 파싱, 레이블↔model_id 매핑, JudgeError 2종(호출/JSON 파싱 실패), latency/cost 기록, winner/전략 결정, 합성, `check_pass()` 6종(pass/fail 파싱, rubric·콘텐츠 프롬프트 포함, JSON 아님/passed 비bool/호출 실패 시 JudgeError) |
 | `test_step7_safety.py` | 5 | 비밀정보/인젝션/고위험 키워드 탐지 |
+| `test_delegation_composition.py` | 13 | **매니저-워커 조립**(ADR 0014) — 매니저가 조각 본문을 안 보는가(concat), 조각끼리 서로를 안 보는가, 성공한 조각이 계획 순서로 전부 남는가, 조각 파일에 메타데이터 헤더가 없는가(체인 시절 회귀), 상한을 매니저가 아니라 코드가 강제하는가, 조립 실패 시 이어붙인 초안을 버리지 않는가 |
 | `test_step9_integration.py` | 13 | 두 패턴 전체 실행, 재현성, 적합성 게이트, 승인 체크포인트, partial 승격 경로 Safety 회귀, 구독 provider 한도 보호 2종, resume 시 run_meta pid 갱신 |
 | `test_iterative_refinement.py` | 7 | 반복 루프 통합(1라운드 통과/피드백이 다음 라운드 프롬프트에 주입/상한 도달 시 partial 승격/비용·지연 라운드 합산/생성 영구 실패/evaluator 실패 시 partial/judge provider 미등록 방어) |
 | `test_agentic_task.py` | 19 | 자율 에이전트를 감싸는 하네스 검증(ADR 0007) — 승인 전 에이전트 미실행(워크스페이스조차 안 생김)/반려 시 파일 없음/격리 워크스페이스에만 생성/`agent_turns.json` 행동 기록/산출물은 파일 시스템 스캔으로 판정/**생성 파일 비밀정보 → safety review + final.md 차단**(회귀 방지 핵심)/정상 파일 오탐 없음/max_turns partial 승격/에이전트 오류·provider 실패 처리/턴 상한 전달/차단된 도구 사용이 run을 실패시키지 않되 기록은 남는지/워크스페이스 경로 정규화(8.3 단축 경로면 정상 쓰기까지 과차단되는 회귀)/에이전트 provider가 후보 목록에서 제외/워크스페이스 스캔 유틸 4종 |
@@ -353,7 +355,6 @@ dashboard/failure_analysis/live_status → cli). CI 없는 프로젝트라 "린�
 | `test_new_domain_script.py` | 14 | config.json/task json 생성, 기존 도메인 재생성 에러, 라우팅 키워드 유무별 분류·경고, provider 레지스트리 구성, **패턴 4종 스캐폴딩**(opt-in 패턴은 `constraints` 자동 주입 — 빠지면 fan_out_judge로 폴백돼 못 쓰는 도메인이 생김, 키워드 라우팅 패턴엔 반대로 넣지 않음, 패턴별 비용 knob/설명, 승인 게이트 안내, 지원 목록 전체 회귀) |
 | `test_setup_worktree_script.py` | 3 | 새 worktree sparse-checkout 적용, 메인 체크아웃 실행 시 거부, domains/ 없을 때 거부(git 호출 전 차단) |
 | `test_subscription_call_metrics.py` | 10 | 구독 호출 횟수 집계(Section 9 Cost Blindness 방지) — 성공 1회/재시도 포함 계상/전부 실패해도 소모분 기록/종량제는 0(이중 계상 방지), 패턴별 집계가 metrics까지 도달(체인 합산·혼합 인증모드·direct_call 경로), 대시보드는 평균이 아니라 누적 합계·옛 run 하위 호환 |
-| `test_chain_final_composition.py` | 6 | 체인 최종 산출물 구성(ADR 0008) — 성공한 모든 스텝 본문 보존(요청한 내용이 사라지지 않는지가 회귀 방지 핵심)/내부 메타데이터 미발행/partial도 같은 규칙/1스텝은 제목 없음, `read_step_content` 헤더 제거·옛 형식 fallback |
 | `test_architecture_layers.py` | 6 | `harness/*.py` 상대 import 추출(순수 함수), 전체 모듈의 허용 계층 준수 여부(`agent_runner` 포함) |
 | `test_quota_fallback_provider.py` | 5 | `QuotaFallbackProvider`(2026-07-27) — quota 오류 시 2차 provider로 전환, quota 아닌 실패는 그대로 전파(폴백 안 함), 성공 시 폴백 안 건드림, **폴백 시 `auth_mode`가 답한 쪽을 따라가는지**(안 그러면 구독 호출이 `subscription_calls`에서 누락, 2026-07-28 회귀 방지) |
 | `test_provider_contract.py` | 6 | **Provider 구현체 전체의 공통 계약**(2026-07-29) — 리플렉션으로 구현체를 찾아 등록표 누락/잔재를 잡고(새 구현체가 조용히 빠지는 것 방지), `auth_mode` 유효값, 정체성 필드, **실패가 `ProviderError`인지**(재시도 분류가 이 계약에 하중을 걸고 있다). API 키 환경변수를 비워서 키 있는 머신에서도 실제 호출이 안 나가게 한다 |

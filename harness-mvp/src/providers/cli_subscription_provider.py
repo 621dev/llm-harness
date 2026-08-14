@@ -265,7 +265,7 @@ class ClaudeCliProvider(CliSubscriptionProvider):
                 cwd=tmp_dir,
             )
         if result.returncode != 0:
-            raise ProviderError(f"claude CLI 종료 코드 {result.returncode}: {result.stderr.strip()}")
+            raise _cli_failure("claude", result)
 
         try:
             data = json.loads(result.stdout)
@@ -527,7 +527,7 @@ class CodexCliProvider(CliSubscriptionProvider):
                 cwd=tmp_dir,
             )
             if result.returncode != 0:
-                raise ProviderError(f"codex CLI 종료 코드 {result.returncode}: {result.stderr.strip()}")
+                raise _cli_failure("codex", result)
 
             if not last_message_path.exists():
                 raise ProviderError("codex CLI가 최종 응답 파일(--output-last-message)을 만들지 않음")
@@ -538,6 +538,67 @@ class CodexCliProvider(CliSubscriptionProvider):
 
             tokens = _extract_codex_output_tokens(result.stdout)
             return content, tokens
+
+
+# 인증 실패를 알아보는 표지. **문자열 매칭이라 이 프로젝트의 취향과 반대지만 다른 수가
+# 없다** — CLI는 종료 코드로 실패 종류를 구분해주지 않고(인증이든 형식 오류든 1이다)
+# 상태 코드도 없다. 그래서 여기서만 예외적으로 문구를 본다. 못 알아보면 재시도 1회를
+# 낭비할 뿐이고 판정 자체가 틀어지지는 않는다(안전한 실패 방향).
+_AUTH_FAILURE_MARKERS = (
+    "oauth session expired",
+    "failed to authenticate",
+    "not logged in",
+    "please run /login",
+    "unauthorized",
+)
+
+
+def _cli_failure(name: str, result: "subprocess.CompletedProcess[str]") -> ProviderError:
+    """CLI가 0이 아닌 코드로 끝났을 때의 예외를 만든다 (2026-08-13).
+
+    **왜 stdout까지 보나**: 예전엔 `stderr`만 실어서 메시지가 통째로 비는 일이 있었다.
+    실측 — claude CLI의 OAuth 세션이 만료됐을 때 하네스가 보고한 건
+    `claude CLI 종료 코드 1: ` 뿐이었고, 정작 원인을 말해주는
+    `"Failed to authenticate: OAuth session expired..."`는 **stdout의 JSON `result`
+    필드**에 있었다. 아래 `is_error` 판정이 그걸 읽지만 **종료 코드 검사가 먼저라
+    거기까지 도달하지 못한다** — 순서 때문에 가장 쓸모 있는 정보를 버리고 있었다.
+    "실패를 조용히 감추지 않는다"가 실제로 깨지던 자리다.
+
+    **왜 인증 실패를 표시하나**: 표시가 없으면 `generate_with_retry`가 재시도해서
+    **성공할 수 없는 호출에 구독 한도를 한 번 더 쓴다**(실제로 "1차 … 2차"로 두 번
+    나갔다). 판정 근거를 만들어주는 게 이 함수의 두 번째 일이다.
+    """
+    stderr = (result.stderr or "").strip()
+    detail = stderr
+    # claude는 JSON 한 방(`--output-format json`), codex는 JSONL 스트림이라 모양이 다르다.
+    # 어느 쪽이든 "사람이 읽을 오류 문장"을 찾는 게 목적이므로 둘 다 훑는다.
+    for line in (result.stdout or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        message = payload.get("result") or payload.get("message") or payload.get("error")
+        if isinstance(message, str) and message.strip():
+            detail = f"{stderr} {message.strip()}".strip() if stderr else message.strip()
+            break
+
+    if not detail:
+        detail = "(CLI가 stdout/stderr에 아무 메시지도 남기지 않았다)"
+
+    lowered = detail.lower()
+    is_auth = any(marker in lowered for marker in _AUTH_FAILURE_MARKERS)
+    # **`{name} login`이 아니다.** 첫 구현이 그렇게 안내했는데 claude CLI에는 그런 명령이
+    # 없다(`claude auth login`이고, 상태 확인은 `claude auth status`) — 실제로 사용자가
+    # 그 안내를 그대로 따라 "내부 또는 외부 명령이 아닙니다"를 봤다. 안내 문구도 검증
+    # 대상이라는 사례다.
+    hint = f" — `{name} auth login`으로 다시 로그인할 것" if is_auth else ""
+    return ProviderError(
+        f"{name} CLI 종료 코드 {result.returncode}: {detail}{hint}",
+        is_auth_error=is_auth,
+    )
 
 
 def _extract_codex_output_tokens(stdout: str) -> Optional[int]:

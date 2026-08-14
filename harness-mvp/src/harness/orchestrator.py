@@ -34,6 +34,7 @@ from providers.base import Provider
 
 from . import (
     agent_runner,
+    delegation,
     judge,
     live_status,
     model_runner,
@@ -41,7 +42,6 @@ from . import (
     router,
     run_store,
     safety,
-    subagent_runner,
     learning,
     synthesizer,
 )
@@ -50,7 +50,6 @@ from .budget import BudgetTracker
 from .schemas import (
     Approval,
     Candidate,
-    DelegationStep,
     Observation,
     Plan,
     RefinementRound,
@@ -69,6 +68,22 @@ JUDGE_PROVIDER_KEY = "__judge__"
 # 이 키로 등록된 provider는 일반 후보/역할 호출에서 제외되고 agentic_task에서만 쓰인다 —
 # 도구 사용 권한을 가진 provider가 다른 패턴에 실수로 섞여 들어가지 않게 하는 안전장치이기도 하다.
 AGENT_PROVIDER_KEY = "__agent__"
+
+# hierarchical_delegation이 **매니저**를 찾는 예약 키 (ADR 0014). 워커(codex/gemini)가
+# 큰 조각을 만들고, 매니저(claude)는 분해와 조립만 한다 — 매니저를 워커 자리에 섞으면
+# 아끼려던 자원을 그대로 쓰게 되므로 `_worker_providers()`가 제외한다.
+MANAGER_PROVIDER_KEY = "__manager__"
+
+# 워커 provider 키 접두사. 여러 개라서 단일 키가 아니다 — `_worker_providers()`가
+# 이 접두사로만 워커를 고른다(이유는 그 함수 docstring).
+WORKER_PROVIDER_PREFIX = "__worker__"
+
+# 조각 수 상한. 조각 하나가 워커 호출 하나라 비용에 직결된다(cli.py가 config로 덮어쓴다).
+MAX_DELEGATION_PARTS = 6
+
+# 조립 방식: "concat"(LLM 호출 0회) 또는 "llm"(조각 총량 × 1회). 기본이 concat인 이유는
+# 이 패턴이 아끼려는 게 매니저 토큰이기 때문이다 — ADR 0014.
+DELEGATION_ASSEMBLE_MODE = "concat"
 
 # agentic_task의 턴 상한. 에이전트가 도구를 호출하며 진행하는 횟수를 묶는다
 # (Section 6 "무한 재시도 금지"와 같은 철학, 여기서는 무한 루프 금지).
@@ -311,10 +326,20 @@ def _candidate_providers(providers: dict[str, Provider]) -> dict[str, Provider]:
 
     역할 키 목록은 planner의 어휘에서 만든다 — 문자열 접미사(`-mock`)로 걸러내면
     사용자가 그 이름의 후보 모델을 등록하는 순간 조용히 사라진다.
+
+    - **매니저/워커 provider(ADR 0014)** — 2026-08-13 추가. **같은 결함을 세 번째로 만든
+      자리다.** 매니저-워커 키를 안 빼서 `direct_call`이 매니저를 후보로 집어 썼다(새
+      테스트가 "매니저 호출 1회"를 통과시켰는데, 실제로는 위임이 아니라 direct_call이
+      매니저를 부른 것이었다 — 통과가 근거가 아니라는 사례가 하나 더 늘었다).
+      매니저는 분해·조립만 해야 하고, 워커는 위임 경로가 직접 고른다.
     """
     role_keys = {f"{role}-mock" for role in planner.KNOWN_DELEGATION_ROLES}
-    excluded = {JUDGE_PROVIDER_KEY, AGENT_PROVIDER_KEY} | role_keys
-    return {key: p for key, p in providers.items() if key not in excluded}
+    excluded = {JUDGE_PROVIDER_KEY, AGENT_PROVIDER_KEY, MANAGER_PROVIDER_KEY} | role_keys
+    return {
+        key: p
+        for key, p in providers.items()
+        if key not in excluded and not key.startswith(WORKER_PROVIDER_PREFIX)
+    }
 
 
 def _limit_subscription_candidates(candidate_providers: list[Provider]) -> list[Provider]:
@@ -447,74 +472,116 @@ def _run_fan_out_judge(
 def _run_hierarchical_delegation(
     task: TaskInput, plan: Plan, providers: dict[str, Provider], run_dir: Path, budget: BudgetTracker
 ) -> Observation:
-    observations, chain_completed = subagent_runner.run_chain(
-        plan.delegation_chain, providers, task.prompt, run_dir, budget=budget
-    )
-    executed_steps = plan.delegation_chain[: len(observations)]
-    completed = sum(1 for step in executed_steps if step.status == "success")
-    failed = sum(1 for step in executed_steps if step.status == "error")
-    latency_ms = finalization.sum_optional_int(step.latency_ms for step in executed_steps)
-    cost_usd = finalization.sum_optional_float(step.cost_usd for step in executed_steps)
-    subscription_calls = sum(step.subscription_calls for step in executed_steps)
+    """매니저-워커 위임 (ADR 0014 재작성). 분해 → 조각 병렬 실행 → 조립.
 
-    if not chain_completed:
-        return finalization.finalize_partial_chain(
-            run_dir, executed_steps, _render_chain_final(run_dir, executed_steps),
-            latency_ms=latency_ms, cost_usd=cost_usd,
-            subscription_calls=subscription_calls, completed=completed, failed=failed
+    **`plan.delegation_chain`을 쓰지 않는다.** 조각은 planner가 정적으로 정할 수 없고
+    매니저가 요청을 보고 런타임에 결정한다 — 그게 "매니저가 지휘한다"의 실체다.
+    체인 시절 계획 필드는 아직 스키마에 남아 있지만 이 경로는 참조하지 않는다.
+    """
+    manager = providers.get(MANAGER_PROVIDER_KEY)
+    if manager is None:
+        raise ValueError(
+            f"hierarchical_delegation에는 매니저 provider가 필요하다 "
+            f"(providers[{MANAGER_PROVIDER_KEY!r}]에 등록, ADR 0014 참고)"
+        )
+    workers = list(_worker_providers(providers).values())
+    if not workers:
+        raise ValueError("hierarchical_delegation에는 워커 provider가 최소 1개 필요하다")
+
+    errors: list[dict[str, str]] = []
+
+    # 1) 분해 — 매니저 1회. 입력·출력 모두 작지만 **계량에서 빠뜨리면 안 된다**
+    # (처음에 빠뜨려서 구독 호출 3회를 2회로 보고했고 테스트가 잡았다 — Section 9).
+    try:
+        delegation_plan, decomposer = delegation.decompose(
+            task.prompt, manager, max_parts=MAX_DELEGATION_PARTS, budget=budget
+        )
+    except delegation.DelegationError as exc:
+        errors.append({"stage": "delegation decompose", "message": str(exc)})
+        return finalization.finalize_without_output(
+            run_dir, errors=errors, latency_ms=None, cost_usd=None,
+            subscription_calls=0, completed=0, failed=1
         )
 
+    # 2) 실행 — 조각끼리 서로를 보지 않는다. 전문은 artifacts/parts/ 에만.
+    delegation.run_workers(task.prompt, delegation_plan.parts, workers, run_dir, budget=budget)
+
+    parts = delegation_plan.parts
+    completed = sum(1 for p in parts if p.status == "success")
+    failed = sum(1 for p in parts if p.status == "error")
+    # 분해(매니저) + 조각(워커)을 함께 합산한다 — 자리가 달라도 같은 run의 소모다.
+    latency_ms = finalization.sum_optional_int(
+        [decomposer.latency_ms, *(p.latency_ms for p in parts)]
+    )
+    cost_usd = finalization.sum_optional_float(
+        [decomposer.cost_usd, *(p.cost_usd for p in parts)]
+    )
+    subscription_calls = decomposer.subscription_calls + sum(p.subscription_calls for p in parts)
+    for part in parts:
+        if part.status == "error":
+            errors.append({
+                "stage": "delegation worker",
+                "message": f"조각 '{part.title}' 생성 실패 (워커 {part.provider_id})",
+            })
+
+    # 계획은 조각 결과까지 채워진 상태로 남긴다 — "매니저가 무엇을 지시했고 무엇이
+    # 돌아왔나"가 이 패턴의 유일한 감사 기록이다(본문은 조각 파일에 있다).
+    run_store.write_json(run_dir, "delegation.json", delegation_plan.model_dump(mode="json"))
+
+    if completed == 0:
+        errors.append({"stage": "hierarchical_delegation", "message": "성공한 조각이 없다"})
+        return finalization.finalize_without_output(
+            run_dir, errors=errors, latency_ms=latency_ms, cost_usd=cost_usd,
+            subscription_calls=subscription_calls, completed=0, failed=failed
+        )
+
+    # 3) 조립 — concat이면 LLM 호출 0회.
+    try:
+        final_content, assembler = delegation.assemble(
+            task.prompt, delegation_plan, run_dir,
+            mode=DELEGATION_ASSEMBLE_MODE, manager=manager, budget=budget,
+        )
+    except delegation.DelegationError as exc:
+        errors.append({"stage": "delegation assemble", "message": str(exc)})
+        return finalization.finalize_without_output(
+            run_dir, errors=errors, latency_ms=latency_ms, cost_usd=cost_usd,
+            subscription_calls=subscription_calls, completed=completed, failed=failed
+        )
+    if assembler is not None:
+        latency_ms = finalization.sum_optional_int([latency_ms, assembler.latency_ms])
+        cost_usd = finalization.sum_optional_float([cost_usd, assembler.cost_usd])
+        subscription_calls += assembler.subscription_calls
+        if assembler.status == "error":
+            # 이어붙인 초안이 이미 유효한 문서라 버리지 않는다 — 실패는 남기고 진행한다.
+            errors.append({
+                "stage": "delegation assemble",
+                "message": f"매니저 조립 실패 — 이어붙인 초안을 그대로 씀: {assembler.content}",
+            })
+
+    partial = failed > 0
     return finalization.finalize(
-        run_dir, _render_chain_final(run_dir, executed_steps), errors=[],
+        run_dir, final_content, errors=errors,
         latency_ms=latency_ms, cost_usd=cost_usd,
-        subscription_calls=subscription_calls, completed=completed,
-        failed=failed, stage="hierarchical_delegation",
+        subscription_calls=subscription_calls, completed=completed, failed=failed,
+        stage="hierarchical_delegation_partial" if partial else "hierarchical_delegation",
+        content_prefix="(partial) " if partial else "",
+        success_summary=(
+            f"매니저-워커 위임 완료 — 조각 {completed}개"
+            + (f", {failed}개 실패(부분 산출물)" if partial else "")
+            + f" / 조립 {DELEGATION_ASSEMBLE_MODE}"
+        ),
     )
 
 
-def _render_chain_final(run_dir: Path, steps: list[DelegationStep]) -> str:
-    """체인의 **발행물 한 개**를 골라 최종 산출물로 삼는다 (ADR 0013).
+def _worker_providers(providers: dict[str, Provider]) -> dict[str, Provider]:
+    """조각을 만들 워커만 추린다 — `__worker__:` 접두사로 **명시적으로 등록된 것만**.
 
-    **이력**: 원래는 `steps[-1]`이었다. `[research, design_review]`처럼 마지막이 검토
-    역할이면 final.md가 요청물이 아니라 **리뷰 코멘트**가 됐다(2026-07-28 측정에서 발견).
-    ADR 0008이 그걸 "성공한 **모든** 스텝을 `## N. 역할`로 엮기"로 고쳤는데, 그 방식이
-    새 문제를 만들었다 — **final.md가 발행물이 아니라 내부 공정 기록이 됐다.**
-
-    실측(`server-engineering-learning` run, 424줄): `## 1. research`(초안) +
-    `## 2. design_review`(리뷰 코멘트) + `## 3. content_finalization`(최종본)이 이어져,
-    **같은 문서의 두 판본과 그 사이 리뷰가 한 파일에** 들어갔다. 4차 측정에서 판정자가
-    `'design_review'`를 역할 이름으로 언급한 게 이 구조 때문이다. ADR 0011에서 fan_out의
-    후보 병합을 폐기한 것과 **같은 결함 유형**이다.
-
-    **규칙: 검토 역할이 아닌 마지막 스텝의 본문만 낸다.**
-
-    - `[research, design_review, content_finalization]` → `content_finalization`
-      (리뷰를 반영한 완성본. 리뷰와 초안은 이미 그 안에 녹아 있다)
-    - `[research, design_review]` → `research` (초안이 요청물. ADR 0008이 고치려던 그 경우)
-    - `[design_review, implementation_review]` → `implementation_review`
-      **검토만으로 구성된 체인은 리뷰가 곧 요청물이므로** 마지막 스텝을 그대로 쓴다
-
-    버려지는 게 아니다 — 모든 스텝은 `artifacts/chain/step-N-역할.md`에 그대로 남는다.
-    final.md에서 빼는 것뿐이다(ADR 0008 결정 2번 "내부 메타데이터는 발행물에서 뺀다"의
-    연장선 — 공정 기록도 메타데이터다).
-
-    LLM 합성 스텝은 여전히 추가하지 않는다: ADR 0008이 기각한 근거(호출 추가 = "필요할
-    때만 만든다" 위반)가 유효하고, ADR 0011도 같은 이유로 기각했다.
+    "예약 키를 뺀 나머지"로 고르지 않는 이유가 이 패턴의 핵심이다. 후보 provider 목록에는
+    보통 claude가 들어 있고(`candidate_models`), 그게 워커로 새어 들어오면 **매니저가
+    자기에게 위임하는 셈**이 되어 아끼려던 자원을 그대로 쓴다. 조용히 틀리는 쪽보다
+    "워커가 없다"고 실패하는 쪽이 낫다.
     """
-    successful = [step for step in steps if step.status == "success"]
-    if not successful:
-        return ""
-    return subagent_runner.read_step_content(run_dir, _publishable_step(successful))
-
-
-def _publishable_step(successful: list[DelegationStep]) -> DelegationStep:
-    """발행할 스텝 하나를 고른다 — 검토 역할이 아닌 마지막 것.
-
-    검토 역할만으로 이뤄진 체인(`sequential_review` 기본 구성이 그렇다)에서는 리뷰가
-    곧 요청물이므로 마지막 스텝을 쓴다. 이 폴백이 없으면 그 체인의 final.md가 빈다.
-    """
-    publishable = [s for s in successful if s.role not in planner.REVIEW_DELEGATION_ROLES]
-    return publishable[-1] if publishable else successful[-1]
+    return {key: p for key, p in providers.items() if key.startswith(WORKER_PROVIDER_PREFIX)}
 
 
 def _run_iterative_refinement(

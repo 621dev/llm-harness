@@ -176,6 +176,17 @@ def _default_providers(models: Sequence[str], config: HarnessConfig) -> dict[str
         "judge", config.judge_model, config.judge_fallback_model
     )
 
+    # 매니저-워커 위임 (ADR 0014). 매니저는 분해·조립만 하고, 큰 조각은 워커가 만든다.
+    # **워커를 예약 키로 따로 등록하는 이유**: 후보 목록(candidate_models)에는 보통
+    # claude가 있고 그게 워커로 새어 들어가면 매니저가 자기에게 위임하는 셈이 된다.
+    _validate_model_names(config.delegation_worker_models)
+    providers[orchestrator.MANAGER_PROVIDER_KEY] = _wrap_with_quota_fallback(
+        "manager", config.delegation_model, config.judge_fallback_model
+    )
+    for worker in config.delegation_worker_models:
+        key = f"{orchestrator.WORKER_PROVIDER_PREFIX}:{worker}"
+        providers[key] = _wrap_with_quota_fallback(key, worker, config.candidate_fallback_model)
+
     # agentic_task 전용 에이전트 provider (ADR 0007). 모델 레지스트리를 안 거치고
     # claude로 고정한다 — codex는 stream 이벤트 형식이 달라 이번 범위 밖이고,
     # gemini는 애초에 CLI 구독 모드가 없다(모듈 docstring 참고). 이 provider는
@@ -195,6 +206,8 @@ def _providers_from_args(args: argparse.Namespace) -> dict[str, Provider]:
     orchestrator.MAX_SUBSCRIPTION_CANDIDATES = config.max_subscription_candidates
     # 후보 병렬 실행은 model_runner가 담당하므로 값도 그쪽에 둔다(orchestrator 경유 없음).
     model_runner.MAX_PARALLEL_CANDIDATES = config.max_parallel_candidates
+    orchestrator.MAX_DELEGATION_PARTS = config.max_delegation_parts
+    orchestrator.DELEGATION_ASSEMBLE_MODE = config.delegation_assemble_mode
     orchestrator.MAX_REFINEMENT_ROUNDS = config.max_refinement_rounds
     orchestrator.MAX_AGENT_TURNS = config.max_agent_turns
     orchestrator.BUDGET_USD = config.budget_usd

@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from harness import model_runner, orchestrator, run_store  # noqa: E402
 from harness.schemas import Candidate, ProviderConfig, TaskInput  # noqa: E402
 from providers.base import Provider, ProviderError  # noqa: E402
+from providers.mock import MockProvider  # noqa: E402
 
 
 class _StubProvider(Provider):
@@ -89,42 +90,57 @@ class MetricsAggregationTest(unittest.TestCase):
     def metrics_of(self, run_id: str) -> dict:
         return run_store.read_json(self.tmp_dir / run_id, "metrics.json")
 
-    def test_hierarchical_delegation_sums_chain_steps(self) -> None:
-        # ADR 0009로 체인은 opt-in 전용이다(키워드만으로는 fan_out_judge).
+    def _delegation_providers(self, *, manager: str, workers: list[str]) -> dict:
+        """매니저-워커 위임용 provider (ADR 0014). auth_mode를 자리별로 지정한다.
+
+        매니저는 유효한 분해 JSON을 내야 하므로 `MockProvider(profile="manager")`를 쓴다 —
+        `_StubProvider`는 고정 문자열을 돌려줘서 분해 파싱을 통과하지 못한다.
+        """
+        providers: dict = {
+            orchestrator.MANAGER_PROVIDER_KEY: MockProvider(
+                ProviderConfig(provider_id="manager", model_id="manager-mock", auth_mode=manager),
+                profile="manager",
+            )
+        }
+        for index, auth_mode in enumerate(workers, start=1):
+            key = f"{orchestrator.WORKER_PROVIDER_PREFIX}:worker{index}"
+            providers[key] = _StubProvider(key, auth_mode=auth_mode)
+        return providers
+
+    def test_hierarchical_delegation_sums_manager_and_workers(self) -> None:
+        """분해 1회(매니저) + 조각마다 1회(워커)를 전부 센다.
+
+        **조립은 세지 않는다** — 기본 조립(`concat`)은 LLM 호출이 0회다(ADR 0014).
+        체인 시절 이 테스트는 "스텝 3개 = 3회"였는데, 지금은 같은 3회가 다른 이유로
+        나온다: 매니저 1 + 조각 2. 짧은 요청이라 mock 매니저가 조각을 2개로 쪼갠다.
+        """
         task = TaskInput(
             task_id="sub-chain",
             prompt="NCP XX를 조사해줘. 그 다음 검토해줘.",
-            constraints=["team_pattern:hierarchical_delegation"],
+            constraints=["team_pattern:hierarchical_delegation"],  # 진입은 여전히 opt-in
         )
-        providers = {
-            "research-mock": _StubProvider("research-mock", auth_mode="cli_subscription"),
-            "design_review-mock": _StubProvider("design_review-mock", auth_mode="cli_subscription"),
-            "content_finalization-mock": _StubProvider(
-                "content_finalization-mock", auth_mode="cli_subscription"
-            ),
-        }
+        providers = self._delegation_providers(
+            manager="cli_subscription", workers=["cli_subscription", "cli_subscription"]
+        )
 
         orchestrator.run(task, providers, root=self.tmp_dir)
 
-        # 기본 체인은 research + design_review + content_finalization 3스텝
-        # (2026-07-27 content_finalization 추가) = 구독 호출 3회
         self.assertEqual(self.metrics_of("run-sub-chain")["subscription_calls"], 3)
 
     def test_mixed_auth_modes_count_only_subscription(self) -> None:
-        """같은 run 안에 종량제와 구독이 섞여 있으면 구독분만 세야 한다."""
-        # ADR 0009로 체인은 opt-in 전용이다(키워드만으로는 fan_out_judge).
+        """같은 run 안에 종량제와 구독이 섞여 있으면 구독분만 세야 한다.
+
+        매니저가 구독(claude), 워커가 종량제인 구성 — 실제 배치와 반대 방향이지만
+        (보통 매니저 claude/구독 + 워커 codex/구독) 자리별 집계를 갈라 보려면 필요하다.
+        """
         task = TaskInput(
             task_id="sub-mixed",
             prompt="NCP XX를 조사해줘. 그 다음 검토해줘.",
             constraints=["team_pattern:hierarchical_delegation"],
         )
-        providers = {
-            "research-mock": _StubProvider("research-mock", auth_mode="api_key"),
-            "design_review-mock": _StubProvider("design_review-mock", auth_mode="cli_subscription"),
-            "content_finalization-mock": _StubProvider(
-                "content_finalization-mock", auth_mode="api_key"
-            ),
-        }
+        providers = self._delegation_providers(
+            manager="cli_subscription", workers=["api_key", "api_key"]
+        )
 
         orchestrator.run(task, providers, root=self.tmp_dir)
 

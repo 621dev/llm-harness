@@ -55,10 +55,14 @@ _ALLOWED_INTERNAL_IMPORTS: dict[str, set[str]] = {
     "planner": {"router", "schemas"},
     "judge": {"budget", "model_runner", "schemas"},
     "subagent_runner": {"budget", "run_store", "model_runner", "schemas"},
+    # delegation은 매니저-워커 위임(ADR 0014). subagent_runner(역할 체인)와 같은 자리라
+    # 의존도 같다 — 어떤 패턴이 자기를 불렀는지는 모르고 orchestrator가 순서를 준다.
+    "delegation": {"budget", "run_store", "model_runner", "schemas"},
     "agent_runner": {"run_store", "schemas"},
     "orchestrator": {
         "agent_runner",
         "budget",
+        "delegation",
         "finalization",
         "learning",
         "judge",

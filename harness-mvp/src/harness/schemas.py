@@ -26,6 +26,11 @@ TeamPattern = Literal["fan_out_judge", "hierarchical_delegation", "iterative_ref
 AuthMode = Literal["api_key", "cli_subscription"]
 RiskLevel = Literal["low", "medium", "high"]
 StepStatus = Literal["success", "error"]
+
+# 조각은 "아직 안 돌았다"는 상태가 실재한다 — 매니저가 분해한 직후와 워커가 돌기 전
+# 사이가 그 상태이고, `delegation.json`에 그대로 남아야 "무엇이 실행되지 않았나"가 보인다
+# (예산 상한에 걸려 안 돌린 조각과 실패한 조각은 다른 사실이다).
+PartStatus = Literal["pending", "success", "error"]
 ObservationStatus = Literal["success", "warning", "error"]
 NextAction = Literal["retry", "continue", "skip", "ask_user"]
 ApprovalStatus = Literal["not_required", "pending", "approved", "rejected"]
@@ -58,6 +63,46 @@ class DelegationStep(BaseModel):
     # 방지, Section 9)를 위해 여기 남겨둔다.
     latency_ms: Optional[int] = None
     cost_usd: Optional[float] = None
+
+
+class WorkerPart(BaseModel):
+    """매니저가 쪼갠 산출물 한 조각. 워커 하나가 이걸 받아 **파일 하나**를 만든다 (ADR 0014).
+
+    `DelegationStep`(역할 체인)의 후신이다. 차이가 둘인데 그게 이 패턴의 전부다:
+
+    1. `role`("누가 하나") 대신 `title`("무엇을 만드나") — 조각은 최종 문서의 한 섹션이다.
+    2. **조각끼리 서로를 보지 않는다.** 체인은 앞 단계 출력 전문을 다음 단계에 다시
+       실어 보내 입력이 제곱에 가깝게 자랐다(3역할 78배, 5역할 320배). 조각은 원본
+       요청과 자기 지시만 받으므로 **조각 수에 선형**이다.
+
+    `content`가 없는 게 의도다 — 본문은 `output_ref` 파일에만 있고, 매니저 컨텍스트에는
+    `title`/`chars`/경로만 올라간다. 그게 이 패턴이 아끼려는 것이다.
+    """
+
+    title: str
+    instruction: str
+    provider_id: Optional[str] = None  # 실제로 어느 워커가 만들었나 (실행 후 채워짐)
+    output_ref: Optional[str] = None
+    chars: Optional[int] = None  # 본문 대신 크기만 — 매니저가 보는 유일한 규모 정보
+    status: PartStatus = "pending"
+    subscription_calls: int = 0
+    # 컨텍스트 격리는 "본문을 노출하지 않는다"는 것이고 작은 숫자 지표를 숨기는 게
+    # 아니다(DelegationStep과 같은 이유 — Cost Blindness 방지, Section 9).
+    latency_ms: Optional[int] = None
+    cost_usd: Optional[float] = None
+    input_tokens: Optional[int] = None
+
+
+class DelegationPlan(BaseModel):
+    """매니저가 만든 분해 계획. **이 패턴에서 매니저가 실제로 붙잡고 있는 유일한 것.**
+
+    작게 유지되는 게 핵심이다 — 조각 본문이 아니라 제목·지시·머리글만 담는다.
+    `concat` 조립 모드에서 최종 문서의 뼈대가 이것이고, 본문은 조각 파일에서 온다.
+    """
+
+    document_title: str
+    intro: str  # 문서 머리글. 본문이 만들어지기 **전에** 쓰므로 조각을 읽지 않아도 된다
+    parts: list[WorkerPart] = Field(default_factory=list)
 
 
 class ProviderConfig(BaseModel):

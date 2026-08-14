@@ -85,17 +85,31 @@ def all_subscription_fan_out_providers() -> dict[str, MockProvider]:
     return providers
 
 
-def delegation_providers(*, fail_times: dict[str, int] | None = None) -> dict[str, MockProvider]:
+def delegation_providers(
+    *, fail_times: dict[str, int] | None = None, workers: int = 2
+) -> dict[str, MockProvider]:
+    """매니저-워커 위임용 provider 묶음 (ADR 0014로 역할 provider가 워커로 바뀌었다).
+
+    워커는 `__worker__:` 접두사로 **명시 등록해야** 한다 — orchestrator가 그 접두사만
+    보고 워커를 고른다(후보 목록의 claude가 워커로 새어 들어오는 걸 막기 위함).
+    """
     fail_times = fail_times or {}
-    roles = ["research", "design_review", "implementation_review", "content_finalization"]
-    return {
-        f"{role}-mock": MockProvider(
-            ProviderConfig(provider_id=f"{role}-mock", model_id=f"{role}-mock"),
-            profile="detailed",
-            fail_times=fail_times.get(f"{role}-mock", 0),
+    providers: dict[str, MockProvider] = {
+        orchestrator.MANAGER_PROVIDER_KEY: MockProvider(
+            ProviderConfig(provider_id="manager", model_id="manager-mock"),
+            profile="manager",
+            fail_times=fail_times.get("manager", 0),
         )
-        for role in roles
     }
+    for index in range(1, workers + 1):
+        name = f"worker{index}"
+        key = f"{orchestrator.WORKER_PROVIDER_PREFIX}:{name}"
+        providers[key] = MockProvider(
+            ProviderConfig(provider_id=key, model_id=f"{name}-mock"),
+            profile="detailed",
+            fail_times=fail_times.get(name, 0),
+        )
+    return providers
 
 
 class FanOutJudgeIntegrationTest(unittest.TestCase):
@@ -266,24 +280,47 @@ class HierarchicalDelegationIntegrationTest(unittest.TestCase):
                      "metrics.json", "errors.json", "run_meta.json"):
             self.assertTrue((run_dir / name).exists(), f"{name} 이 없음")
         self.assertFalse((run_dir / "judging.json").exists())  # 이 패턴엔 Judge 자체가 없음
-        self.assertTrue((run_dir / "artifacts" / "chain" / "step-1-research.md").exists())
-        self.assertTrue((run_dir / "artifacts" / "chain" / "step-2-design_review.md").exists())
+        # 매니저가 지시한 것과 돌아온 것 — 이 패턴의 유일한 감사 기록 (본문은 조각 파일에)
+        self.assertTrue((run_dir / "delegation.json").exists())
+        parts_dir = run_dir / "artifacts" / "parts"
+        self.assertTrue(parts_dir.is_dir())
+        self.assertGreaterEqual(len(list(parts_dir.glob("*.md"))), 2)
 
-    def test_mid_chain_failure_promotes_partial_result(self) -> None:
+    def test_manager_never_receives_part_bodies_in_concat_mode(self) -> None:
+        """**이 패턴의 존재 이유**: 기본 조립에서 매니저는 조각 본문을 보지 않는다.
+
+        매니저 호출은 분해 1회뿐이어야 한다. 조립까지 매니저가 하면 조각 총량이 매니저
+        입력으로 들어가 아끼려던 걸 그대로 쓴다(ADR 0014).
+        """
         task = make_task(
-            "delegation-mid-fail", "설계 리뷰 결과를 반영해서 순차 검토를 진행해줘", ["team_pattern:hierarchical_delegation"]
-        )  # -> sequential_review: design_review -> implementation_review (ADR 0009: opt-in 필요)
-        providers = delegation_providers(fail_times={"implementation_review-mock": 2})
+            "delegation-concat", "경쟁사 A/B/C의 가격 정책을 리서치해줘", ["team_pattern:hierarchical_delegation"]
+        )
+        providers = delegation_providers()
+
+        orchestrator.run(task, providers, root=self.tmp_dir)
+
+        manager = providers[orchestrator.MANAGER_PROVIDER_KEY]
+        self.assertEqual(manager.call_count, 1)  # 분해만 — 조립은 LLM 호출 0회
+
+    def test_worker_failure_keeps_the_other_parts_as_partial(self) -> None:
+        """조각 하나가 실패해도 나머지는 살린다 — 체인과 달리 조각은 서로 의존하지 않는다.
+
+        체인에서는 중간 실패가 뒤 단계를 통째로 막았다(앞 결과가 입력이므로). 조각은
+        독립이라 실패한 것만 빠지고 나머지가 그대로 문서가 된다.
+        """
+        task = make_task(
+            "delegation-part-fail", "경쟁사 A/B/C의 가격 정책을 리서치해줘", ["team_pattern:hierarchical_delegation"]
+        )
+        providers = delegation_providers(fail_times={"worker2": 2})  # 재시도까지 실패
 
         observation = orchestrator.run(task, providers, root=self.tmp_dir)
 
-        run_dir = self.tmp_dir / "run-delegation-mid-fail"
+        run_dir = self.tmp_dir / "run-delegation-part-fail"
         self.assertEqual(observation.status, "warning")
         final_content = run_store.read_markdown(run_dir, "final.md")
         self.assertTrue(final_content.startswith("(partial)"))
         errors = run_store.read_json(run_dir, "errors.json")
-        self.assertEqual(len(errors), 1)
-        self.assertIn("implementation_review", errors[0]["stage"])
+        self.assertTrue(any("delegation worker" in e["stage"] for e in errors))
 
     def test_partial_promotion_still_runs_safety_check(self) -> None:
         """회귀 테스트: partial로 승격되는 내용도 Safety 체크를 반드시 거쳐야 한다
@@ -297,9 +334,9 @@ class HierarchicalDelegationIntegrationTest(unittest.TestCase):
         task = make_task(
             "delegation-partial-unsafe",
             "설계 리뷰 결과를 반영해서 순차 검토를 진행해줘. 주민등록번호 예시를 포함해서 검토해줘.",
-            ["team_pattern:hierarchical_delegation"],  # ADR 0009: 체인 진입은 opt-in
+            ["team_pattern:hierarchical_delegation"],  # ADR 0009: 진입은 여전히 opt-in
         )
-        providers = delegation_providers(fail_times={"implementation_review-mock": 2})
+        providers = delegation_providers(fail_times={"worker2": 2})
 
         observation = orchestrator.run(task, providers, root=self.tmp_dir)
 

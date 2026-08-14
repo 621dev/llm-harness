@@ -8,6 +8,7 @@ harness-implementation-plan-ko.md Section 10을 검증한다. 실제 claude/code
 from __future__ import annotations
 
 import shutil
+import json
 import subprocess
 import sys
 import tempfile
@@ -517,6 +518,83 @@ class ExtractCodexOutputTokensTest(unittest.TestCase):
     def test_ignores_non_json_lines(self) -> None:
         stdout = "not json at all\n{broken json\n" '{"type":"turn.completed","usage":{"output_tokens":7}}\n'
         self.assertEqual(_extract_codex_output_tokens(stdout), 7)
+
+
+class CliFailureMessageTest(unittest.TestCase):
+    """CLI가 0이 아닌 코드로 끝났을 때 원인을 잃지 않는가 (2026-08-13, 실측에서 나온 수정).
+
+    **고치기 전 동작**: 종료 코드 검사가 `stderr`만 실었다. claude CLI의 OAuth 세션이
+    만료됐을 때 하네스가 보고한 건 `claude CLI 종료 코드 1: ` 뿐이었고 — 뒤가 비었다 —
+    정작 원인인 `"Failed to authenticate: OAuth session expired..."`는 **stdout의
+    JSON `result` 필드**에 있었다. `is_error` 판정이 그걸 읽지만 **종료 코드 검사가
+    먼저라 거기까지 도달하지 못했다.** 순서 때문에 가장 쓸모 있는 정보를 버렸다.
+
+    게다가 인증 실패로 분류되지 않아 **재시도로 구독 호출을 한 번 더 낭비했다**
+    (실제로 "1차 … 2차"로 두 번 나갔다).
+    """
+
+    def _result(self, *, returncode: int = 1, stdout: str = "", stderr: str = ""):
+        return subprocess.CompletedProcess(args=["claude"], returncode=returncode,
+                                           stdout=stdout, stderr=stderr)
+
+    def test_message_comes_from_stdout_json_when_stderr_is_empty(self) -> None:
+        """핵심 회귀 방지: 이 조합이 실제로 겪은 조합이다(stderr 빈 채 stdout에 원인)."""
+        payload = json.dumps({
+            "type": "result", "is_error": True,
+            "result": "Failed to authenticate: OAuth session expired and could not be refreshed",
+        })
+
+        error = cli_subscription_provider._cli_failure("claude", self._result(stdout=payload))
+
+        self.assertIn("OAuth session expired", str(error))
+        self.assertNotIn("종료 코드 1: —", str(error))  # 메시지 자리가 비지 않는다
+
+    def test_auth_failure_is_flagged_so_it_is_not_retried(self) -> None:
+        """성공할 수 없는 호출에 구독 한도를 한 번 더 쓰지 않는다."""
+        payload = json.dumps({"result": "Failed to authenticate: OAuth session expired"})
+
+        error = cli_subscription_provider._cli_failure("claude", self._result(stdout=payload))
+
+        self.assertTrue(error.is_auth_error)
+        self.assertFalse(error.is_retryable)
+        # **`claude login`이 아니라 `claude auth login`이다.** 첫 구현이 틀린 명령을
+        # 안내해서 사용자가 그대로 따라 실패했다 — 안내 문구도 검증 대상이다.
+        self.assertIn("claude auth login", str(error))
+
+    def test_stderr_is_kept_when_present(self) -> None:
+        """stdout에서 찾았다고 stderr를 버리지 않는다 — 둘 다 단서일 수 있다."""
+        payload = json.dumps({"result": "무언가 실패"})
+
+        error = cli_subscription_provider._cli_failure(
+            "codex", self._result(stdout=payload, stderr="stderr 쪽 단서")
+        )
+
+        self.assertIn("stderr 쪽 단서", str(error))
+        self.assertIn("무언가 실패", str(error))
+
+    def test_ordinary_failure_is_still_retryable(self) -> None:
+        """인증이 아닌 실패는 기존대로 재시도한다(동작 변경 아님)."""
+        error = cli_subscription_provider._cli_failure("codex", self._result(stderr="일시적 네트워크 오류"))
+
+        self.assertFalse(error.is_auth_error)
+        self.assertTrue(error.is_retryable)
+
+    def test_totally_silent_failure_says_so_instead_of_empty(self) -> None:
+        """아무 메시지도 없으면 '없다'고 말한다 — 빈 문자열은 사람을 헤매게 한다."""
+        error = cli_subscription_provider._cli_failure("claude", self._result())
+
+        self.assertIn("아무 메시지도 남기지 않았다", str(error))
+
+    def test_codex_jsonl_stream_error_line_is_found(self) -> None:
+        """codex는 JSONL 스트림이라 모양이 다르다 — 배너 줄이 섞여도 찾아야 한다."""
+        stdout = "\n".join([
+            "Reading additional input from stdin...",   # codex가 실제로 찍는 배너 줄
+            '{"error": "codex 쪽 원인"}',
+        ])
+
+        error = cli_subscription_provider._cli_failure("codex", self._result(stdout=stdout))
+
+        self.assertIn("codex 쪽 원인", str(error))
 
 
 if __name__ == "__main__":

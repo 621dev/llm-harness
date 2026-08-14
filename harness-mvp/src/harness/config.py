@@ -38,9 +38,24 @@ class HarnessConfig(BaseModel):
       `run --models`로 매 실행마다 오버라이드 가능(CLI 인자가 우선).
     - judge_model: fan_out_judge 판단에 쓸 모델. ADR 0004 원칙(후보 생성
       모델과 분리해 self-preference bias 완화)을 지키는 선에서 바꿀 것.
-    - delegation_model: hierarchical_delegation에서 delegation_role_models에
-      명시 안 된 역할에 쓸 기본 모델(역할 분담을 안 쓰면 사실상 전체 역할에
-      쓰임 — 기존 동작과 동일).
+    - delegation_model: hierarchical_delegation의 **매니저** 모델 (ADR 0014로 의미가
+      바뀌었다). 요청을 겹치지 않는 조각으로 쪼개고(분해), 조립을 맡는다. 워커는
+      delegation_worker_models가 담당한다. 예전 의미(역할별 기본 모델)에서 쓰이던
+      delegation_role_models/delegation_role_fallback_models는 재작성된 경로가 더
+      이상 참조하지 않는다 — 체인 코드가 제거될 때 함께 정리 대상이다.
+    - delegation_worker_models: 조각을 실제로 만드는 **워커** 목록 (ADR 0014).
+      기본값 ["codex"]는 구독(이미 지불한 정액)이라 기본에서 돈이 새지 않게 한 것이고,
+      여기에 "gemini"를 더하면 워커 사이가 병렬로 돌아 지연이 줄어든다(같은 워커의
+      조각은 순차 — 한 API의 rate limit에 동시 호출을 겹치지 않게).
+      **매니저는 워커에서 제외된다** — 매니저를 워커로 쓰면 아끼려던 자원을 그대로 쓴다.
+    - max_delegation_parts: 조각 수 상한 (ADR 0014). 조각 하나가 워커 호출 하나라
+      비용에 직결된다. 매니저가 이보다 많이 제안하면 잘라낸다 — 상한을 매니저 판단에
+      맡기지 않는다.
+    - delegation_assemble_mode: "concat" 또는 "llm" (ADR 0014).
+      concat은 매니저 계획의 뼈대에 조각 파일을 끼운다 — **LLM 호출 0회**라 매니저가
+      조각 본문을 보지 않는다(이 패턴이 아끼려는 게 그것이라 기본값이다).
+      llm은 조각을 매니저에게 **한 번** 보내 중복·용어를 정리하게 한다 — 조각 사이
+      정합성을 얻고 조각 총량만큼 토큰을 쓰는 교환이다.
     - delegation_role_models: hierarchical_delegation의 역할(research/
       design_review/implementation_review/content_finalization)별로 다른
       모델을 쓰고 싶을 때만 채운다(역할 분담, 2026-07-14). 명시 안 된 역할은
@@ -104,6 +119,9 @@ class HarnessConfig(BaseModel):
     delegation_role_fallback_models: dict[str, str] = Field(default_factory=dict)
     max_subscription_candidates: int = 1
     max_parallel_candidates: int = 4
+    delegation_worker_models: list[str] = Field(default_factory=lambda: ["codex"])
+    max_delegation_parts: int = 6
+    delegation_assemble_mode: str = "concat"
     max_refinement_rounds: int = 3
     max_agent_turns: int = 8
     budget_usd: Optional[float] = None
